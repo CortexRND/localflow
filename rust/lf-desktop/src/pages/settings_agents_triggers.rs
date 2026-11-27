@@ -423,14 +423,18 @@ impl AgentsSettings {
             return;
         };
         let backend = self.backend.clone();
+        // A close waits for it (the shutdown pending-write tracker).
+        let write = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match &id {
+                    let result = match &id {
                         None => backend.create_rule(&body),
                         Some(id) => backend.update_rule(id, &body),
-                    }
+                    };
+                    drop(write);
+                    result
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -535,10 +539,15 @@ impl AgentsSettings {
             return;
         };
         let backend = self.backend.clone();
+        let write = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.delete_rule(&id) })
+                .spawn(async move {
+                    let result = backend.delete_rule(&id);
+                    drop(write);
+                    result
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.finish(generation, cx) {
@@ -572,10 +581,15 @@ impl AgentsSettings {
         };
         self.triggers.pending_rule = Some((id.clone(), on));
         let backend = self.backend.clone();
+        let write = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.update_rule(&id, &ctl::enabled_patch(on)) })
+                .spawn(async move {
+                    let result = backend.update_rule(&id, &ctl::enabled_patch(on));
+                    drop(write);
+                    result
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.finish(generation, cx) {

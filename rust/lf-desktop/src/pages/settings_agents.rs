@@ -382,10 +382,16 @@ impl AgentsSettings {
         };
         let backend = self.backend.clone();
         let applied = patch.clone();
+        // A close waits for it (the shutdown pending-write tracker).
+        let write = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.set_config(&patch) })
+                .spawn(async move {
+                    let result = backend.set_config(&patch);
+                    drop(write);
+                    result
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.finish(generation, cx) {
@@ -717,6 +723,7 @@ impl AgentsSettings {
         // Moved out of the field (no copy left there), trimmed in place: a
         // pasted trailing newline is not part of the key.
         let value = SecretValue::trimmed(self.key_input.update(cx, |i, cx| i.take_text(cx)));
+        let write = lf_ui::shutdown::register_pending_write();
         self.key_error = None;
         let backend = self.backend.clone();
         let (id, profile, name) = (
@@ -727,7 +734,11 @@ impl AgentsSettings {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { backend.set_secret(&id, &profile, &name, &value) })
+                .spawn(async move {
+                    let result = backend.set_secret(&id, &profile, &name, &value);
+                    drop(write);
+                    result
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.finish(generation, cx) {
@@ -799,16 +810,19 @@ impl AgentsSettings {
             return;
         };
         let backend = self.backend.clone();
+        let write = lf_ui::shutdown::register_pending_write();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    backend.set_secret(
+                    let result = backend.set_secret(
                         &target.id,
                         &target.profile,
                         &target.name,
                         &SecretValue::removal(),
-                    )
+                    );
+                    drop(write);
+                    result
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

@@ -98,3 +98,44 @@ fn a_blank_key_sends_nothing(cx: &mut TestAppContext) {
         "a pasted newline is not part of the key"
     );
 }
+
+/// Agents writes are pending writes while they run, so closing the window
+/// waits for them (config, a key, a trigger). The tracker is
+/// process-wide; only "pending while ours runs" is asserted.
+#[gpui::test]
+fn agents_writes_hold_the_shutdown_tracker(cx: &mut TestAppContext) {
+    use lf_ui::shutdown::wait_for_pending_writes;
+    use std::time::Duration;
+    let (_shell, cx, _dir, fake, agents) = open_tab(cx, FakeAgents::use_settings_fixture);
+    agents.update(cx, |a, cx| {
+        a.set_enabled(false, cx);
+        assert!(a.writing());
+        assert!(
+            !wait_for_pending_writes(Duration::ZERO),
+            "config write pending"
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.calls().set_config, 1);
+    let t = missing_key(&agents, cx);
+    open_key(&agents, &t, cx);
+    agents.update(cx, |a, cx| {
+        a.type_key(PLANTED, cx);
+        a.save_key(cx);
+        assert!(
+            !wait_for_pending_writes(Duration::ZERO),
+            "key write pending"
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.calls().set_secret, 1);
+    agents.update(cx, |a, cx| {
+        a.toggle_rule(crate::sandbox::agents::RULE_ASK.into(), true, cx);
+        assert!(
+            !wait_for_pending_writes(Duration::ZERO),
+            "trigger write pending"
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.calls().update_rule, 1);
+}
