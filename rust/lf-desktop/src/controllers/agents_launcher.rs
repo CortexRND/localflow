@@ -135,6 +135,18 @@ fn launchable(p: &Provider) -> bool {
     p.readiness != Readiness::NotConnected
 }
 
+/// The row `default_provider` resolves to when connected: the same first
+/// connected provider with that id that [`Choice::resolve`] picks. Only
+/// this row may say "Default provider"; choosing another row must not move
+/// the service-level fact with the user's selection.
+fn service_default_provider(store: &Store) -> Option<&Provider> {
+    let id = store.status.as_ref()?.default_provider.as_deref()?;
+    store
+        .providers
+        .iter()
+        .find(|p| p.id == id && p.readiness == Readiness::Connected)
+}
+
 /// The list for this field (design section 4, "List contents").
 pub fn sections(
     store: &Store,
@@ -190,8 +202,10 @@ pub fn sections(
         .map(|p| {
             let name = provider_name(p, &store.providers);
             let workspace = choice.workspace.clone();
+            let service_default = service_default_provider(store)
+                .is_some_and(|d| d.id == p.id && d.profile == p.profile);
             let detail = match p.readiness {
-                Readiness::Connected if choice.is(p) => match &workspace {
+                Readiness::Connected if service_default => match &workspace {
                     Some(ws) => format!("Default provider \u{00b7} {ws}"),
                     None => "Default provider".into(),
                 },
@@ -976,6 +990,30 @@ mod tests {
             sends_line(None, &[], None, false, true),
             "Nothing has been sent."
         );
+    }
+
+    #[test]
+    fn the_default_provider_label_stays_on_the_service_default() {
+        let fake = FakeAgents::fixture();
+        let store = store(&fake);
+        let rows = store.rows(fake_ids::FIXTURE_NOW);
+        let mut choice = chosen(&store);
+        choice.provider = Some(("devin".into(), String::new()));
+        let sections = sections(&store, &rows, "release", &choice, &[]);
+        let detail = |id: &str| {
+            sections[0]
+                .items
+                .iter()
+                .find_map(|i| match i {
+                    Item::Launch {
+                        provider, detail, ..
+                    } if provider.id == id => Some(detail.clone()),
+                    _ => None,
+                })
+                .expect("launch row")
+        };
+        assert_eq!(detail("devin"), "acme/web");
+        assert_eq!(detail("claude"), "Default provider · acme/web");
     }
 
     #[test]
