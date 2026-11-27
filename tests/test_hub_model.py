@@ -1045,6 +1045,110 @@ def test_remove_failure_is_friendly_and_keeps_drafts(controller, store):
     assert controller.word_field.value == "draft"
 
 
+# ---- live speaker-label line (U5) ----------------------------------------
+
+_UNAVAILABLE = "Speaker labels: unavailable"
+
+
+@pytest.mark.parametrize("session,expected", [
+    ({}, ""),
+    ({"diarization": None}, ""),
+    ({"diarization": "off"}, ""),
+    ({"diarization": ""}, ""),
+    ({"diarization": True}, ""),
+    ({"diarization": "warming"}, ""),
+    ({"diarization": "off", "diarization_error": "boom"}, ""),
+    ({"diarization": "collecting"}, "Speaker labels: collecting"),
+    ({"diarization": "collecting", "diarization_error": "boom"},
+     "Speaker labels: collecting"),
+    ({"diarization": "unavailable"}, _UNAVAILABLE),
+    ({"diarization": "unavailable", "diarization_error": ""}, _UNAVAILABLE),
+    ({"diarization": "unavailable", "diarization_error": "  \n\t "}, _UNAVAILABLE),
+    ({"diarization": "unavailable", "diarization_error": "."}, _UNAVAILABLE),
+    ({"diarization": "unavailable", "diarization_error": None}, _UNAVAILABLE),
+    ({"diarization": "unavailable", "diarization_error": 42}, _UNAVAILABLE),
+    ({"diarization": "unavailable", "diarization_error": "a\nb\t c"},
+     f"{_UNAVAILABLE} (a b c)"),
+    ({"diarization": "unavailable",
+      "diarization_error": "Speaker models are not downloaded. Run `lf speakers download`."},
+     f"{_UNAVAILABLE} (Speaker models are not downloaded. Run `lf speakers download`)"),
+    ({"diarization": "unavailable", "diarization_error": "bad) Speaker labels: on"},
+     f"{_UNAVAILABLE} (bad) Speaker labels: on)"),
+    (None, ""),
+    ("unavailable", ""),
+    (["diarization"], ""),
+])
+def test_meeting_diarization_status_table(session, expected):
+    assert hub_model.meeting_diarization_status(session) == expected
+
+
+def test_meeting_diarization_status_escapes_and_bounds_the_reason():
+    raw = (
+        "x" + chr(0x202E) + "y " + chr(0x2192) + " z" + chr(0x2028)
+        + "w" + chr(0xA0) + "v\nu\tt."
+    )
+    text = hub_model.meeting_diarization_status(
+        {"diarization": "unavailable", "diarization_error": raw}
+    )
+    assert text.startswith(f"{_UNAVAILABLE} (") and text.endswith(")")
+    for bad in ("\n", "\t", chr(0x202E), chr(0x2028), chr(0xA0), chr(0x2192)):
+        assert bad not in text
+    assert "\\" in text  # the bidi override and arrow are shown escaped
+    assert not text.endswith(".)")
+
+    long = hub_model.meeting_diarization_status(
+        {"diarization": "unavailable", "diarization_error": "y" * 500}
+    )
+    reason = long[len(f"{_UNAVAILABLE} ("):-1]
+    assert reason == "y" * hub_model.MEETING_DIARIZATION_REASON_MAX + "…"
+    assert len(long) <= len(f"{_UNAVAILABLE} ()") + 161
+
+
+@pytest.mark.parametrize("capture", [
+    {"system_audio": "on"},
+    {"system_audio": "off"},
+    {"system_audio": "error", "system_audio_error": "Screen Recording permission denied"},
+    {"system_audio": "error", "system_audio_error": "no loopback device"},
+])
+@pytest.mark.parametrize("diarization", [
+    {"diarization": "off"},
+    {"diarization": "collecting"},
+    {"diarization": "unavailable", "diarization_error": "boom"},
+])
+def test_meeting_capture_status_ignores_diarization(capture, diarization):
+    assert hub_model.meeting_capture_status({**capture, **diarization}) == (
+        hub_model.meeting_capture_status(capture)
+    )
+
+
+def _fake_measure(text):
+    return len(text) * 7
+
+
+def test_meeting_diarization_height():
+    height = hub_model.meeting_diarization_height
+    line = hub_model.MEETING_DIARIZATION_LINE_H
+    assert height("", 400, _fake_measure) == 0
+    assert height("Speaker labels: collecting", 400, _fake_measure) == line + 2 == 18
+
+    status = hub_model.meeting_diarization_status(
+        {"diarization": "unavailable", "diarization_error": "word " * 40}
+    )
+    assert len(status) > 190
+    lines = hub_model.wrap_lines(status, 400 - 8, _fake_measure)
+    assert len(lines) > 1
+    assert height(status, 400, _fake_measure) == len(lines) * line + 2
+
+    token = hub_model.meeting_diarization_status(
+        {"diarization": "unavailable", "diarization_error": "z" * 160}
+    )
+    unbroken = height(token, 400, _fake_measure)
+    assert line * 2 + 2 <= unbroken < 1000
+
+    # A tiny width clamps at 40pt instead of wrapping one char per line.
+    assert height(token, 0, _fake_measure) == height(token, 48, _fake_measure)
+
+
 # ----------------------------------------------------------------- speakers ---
 
 SPEAKER_MID = "2026-11-25-1430"

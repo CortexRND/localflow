@@ -2,6 +2,7 @@ import gc
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,10 +50,14 @@ def _default_speakers():
 
 
 class FakeMeetingClient:
-    def __init__(self, state="idle", *, save_error=None, chat_error=None):
+    def __init__(
+        self, state="idle", *, save_error=None, chat_error=None,
+        diarization: dict | None = None,
+    ):
         self.state = state
         self.save_error = save_error
         self.chat_error = chat_error
+        self.diarization = diarization  # merged into the running session
         self.calls = []
         self.auto_titles = []  # the optional auto_title flag of each start
         # "saved-speakers": the saved meeting's speakers, changed by rename/merge.
@@ -109,6 +114,7 @@ class FakeMeetingClient:
                         {"stamp": "00:04", "source": "me", "text": "I can take this"},
                         {"stamp": "01:12", "source": "others", "text": "Thanks"},
                     ],
+                    **(self.diarization or {}),
                 },
                 "last_saved": None,
                 "chat_available": False,
@@ -271,6 +277,103 @@ def test_meetings_idle_and_running_render(tmp_path):
         assert "device unavailable" in window.meeting_watch.cget("text")
         assert "[00:04] Me: I can take this" in window.meeting_live.cget("text")
         assert "[01:12] Others: Thanks" in window.meeting_live.cget("text")
+    finally:
+        root.destroy()
+
+
+RLO = chr(0x202E)  # right-to-left override
+LEGACY_WATCH = "Planning · mic only — system audio unavailable — device unavailable"
+
+
+def _running(tmp_path, diarization):
+    client = FakeMeetingClient("running", diarization=diarization)
+    root, window = _window(tmp_path, client)
+    _pump(root, lambda: bool(window._meeting_status_data.get("session")))
+    return client, root, window
+
+
+def _pady(widget):
+    pady = widget.pack_info()["pady"]
+    values = pady if isinstance(pady, tuple) else str(pady).split()
+    return tuple(int(str(value)) for value in values)
+
+
+@pytest.mark.parametrize("diarization", [None, {"diarization": "off"}])
+def test_speaker_labels_off_or_absent_leave_the_page_as_before(tmp_path, diarization):
+    _client, root, window = _running(tmp_path, diarization)
+    try:
+        assert window.meeting_watch.cget("text") == LEGACY_WATCH
+        assert window.meeting_diarization.winfo_manager() == ""
+        assert _pady(window.meeting_watch) == (0, 12)
+    finally:
+        root.destroy()
+
+
+def test_speaker_labels_collecting_sits_under_the_watch_line(tmp_path):
+    _client, root, window = _running(
+        tmp_path,
+        {"diarization": "collecting", "diarization_error": "ignored"},
+    )
+    try:
+        assert window.meeting_watch.cget("text") == LEGACY_WATCH
+        assert window.meeting_diarization.cget("text") == "Speaker labels: collecting"
+        slaves = window.meeting_content.pack_slaves()
+        index = slaves.index(window.meeting_watch)
+        assert slaves[index + 1] is window.meeting_diarization
+        assert _pady(window.meeting_watch) == (0, 2)
+        assert _pady(window.meeting_diarization) == (0, 12)
+        live = window.meeting_live.cget("text")
+        assert "[00:04] Me: I can take this" in live
+        assert "[01:12] Others: Thanks" in live
+    finally:
+        root.destroy()
+
+
+def test_speaker_labels_unavailable_reason_is_escaped_and_wraps(tmp_path):
+    reason = "Speaker models failed\nto load: x" + RLO + "y " + "word " * 40 + "."
+    _client, root, window = _running(
+        tmp_path,
+        {"diarization": "unavailable", "diarization_error": reason},
+    )
+    try:
+        window._meeting_wrap(SimpleNamespace(width=400))
+        text = window.meeting_diarization.cget("text")
+        assert text.startswith("Speaker labels: unavailable (")
+        assert text.endswith(")")
+        assert "\n" not in text and RLO not in text
+        assert int(window.meeting_diarization.cget("wraplength")) == 400
+        root.update_idletasks()
+        long_h = window.meeting_diarization.winfo_reqheight()
+
+        window._meeting_status_data["session"]["diarization"] = "collecting"
+        window._meeting_render()
+        root.update_idletasks()
+        assert window.meeting_diarization.winfo_reqheight() < long_h
+    finally:
+        root.destroy()
+
+
+def test_meeting_wrap_clamps_the_speaker_label_width(tmp_path):
+    _client, root, window = _running(tmp_path, {"diarization": "collecting"})
+    try:
+        window._meeting_wrap(SimpleNamespace(width=1))  # not laid out yet
+        assert int(window.meeting_diarization.cget("wraplength")) == 720
+        window._meeting_wrap(SimpleNamespace(width=50))
+        assert int(window.meeting_diarization.cget("wraplength")) == 200
+        window._meeting_wrap(SimpleNamespace(width=2000))
+        assert int(window.meeting_diarization.cget("wraplength")) == 720
+    finally:
+        root.destroy()
+
+
+def test_speaker_labels_unpack_when_the_meeting_is_saved(tmp_path):
+    client, root, window = _running(tmp_path, {"diarization": "collecting"})
+    try:
+        assert window.meeting_diarization.winfo_manager() == "pack"
+        client.state = "saved"
+        window._meeting_poll()
+        _pump(root, lambda: window._meeting_status_data.get("last_saved"))
+        assert window.meeting_diarization.winfo_manager() == ""
     finally:
         root.destroy()
 
@@ -550,9 +653,10 @@ def test_open_notes_opens_markdown_inside_the_vault(tmp_path, monkeypatch):
 
 # ----------------------------------------------------------------- speakers ---
 
-# meeting_content's children as _page_meetings builds them (unchanged by U3).
+# meeting_content's children as _page_meetings builds them (includes U5's
+# unpacked diarization status label; unchanged by U3).
 MEETING_CONTENT_CLASSES = [
-    "Label", "Label", "Frame", "Frame", "Text", "Button", "Label", "Frame", "Frame",
+    "Label", "Label", "Label", "Frame", "Frame", "Text", "Button", "Label", "Frame", "Frame",
 ]
 
 
