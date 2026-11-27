@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "lf"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "lf-agent"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "caseless",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "lf-ask"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "lf-audio"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "cpal 0.15.3",
@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "lf-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1896,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "lf-diarize"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "lf-core",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "lf-input"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "arboard",
  "core-foundation 0.10.1",
@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "lf-meetings"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "block2",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "lf-meetings-backend"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "lf-providers"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "lf-core",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "lf-runtime"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "caseless",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "lf-server"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2040,7 +2040,7 @@ dependencies = [
 
 [[package]]
 name = "lf-stt"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "lf-ui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2183,7 +2183,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "localflow-mcp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",

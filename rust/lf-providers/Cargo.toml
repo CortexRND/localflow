@@ -1,6 +1,6 @@
 [package]
 name = "lf-providers"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 publish = false
 description = "LocalFlow LLM providers, provider keys and endpoint-bound activation snapshots"

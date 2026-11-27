@@ -6,7 +6,7 @@ echo.
 echo Installing LocalFlow - this takes a few minutes; LocalFlow Setup will open when done.
 echo.
 
-set "LF_REF=v0.2.3"
+set "LF_REF=v0.2.4"
 set "LF_SCRIPT=%TEMP%\localflow-install-%RANDOM%.ps1"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri ('https://raw.githubusercontent.com/CortexRND/localflow/' + $env:LF_REF + '/install.ps1') -OutFile $env:LF_SCRIPT"

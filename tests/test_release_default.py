@@ -19,7 +19,7 @@ BASH = shutil.which("bash") if os.name != "nt" else None
 
 def test_release_versions_and_installer_hashes_are_consistent():
     version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    assert version == "0.2.3"
+    assert version == "0.2.4"
     assert f'LOCALFLOW_RELEASE="v{version}"' in (ROOT / "install.sh").read_text(encoding="utf-8")
     assert f"$LocalflowRelease = 'v{version}'" in (ROOT / "install.ps1").read_text(encoding="utf-8")
     cmd = (ROOT / "packaging/windows/Install LocalFlow.cmd").read_bytes()
