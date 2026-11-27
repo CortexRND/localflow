@@ -135,16 +135,17 @@ fn launchable(p: &Provider) -> bool {
     p.readiness != Readiness::NotConnected
 }
 
-/// The row `default_provider` resolves to when connected: the same first
-/// connected provider with that id that [`Choice::resolve`] picks. Only
-/// this row may say "Default provider"; choosing another row must not move
-/// the service-level fact with the user's selection.
+/// The row `default_provider` names directly when connected. A profiled
+/// row is never badged: the service default has no profile dimension, so
+/// calling the first profile the default would invent one. Only this row
+/// may say "Default provider"; choosing another row must not move the
+/// service-level fact with the user's selection.
 fn service_default_provider(store: &Store) -> Option<&Provider> {
     let id = store.status.as_ref()?.default_provider.as_deref()?;
     store
         .providers
         .iter()
-        .find(|p| p.id == id && p.readiness == Readiness::Connected)
+        .find(|p| p.id == id && p.profile.is_empty() && p.readiness == Readiness::Connected)
 }
 
 /// The list for this field (design section 4, "List contents").
@@ -1014,6 +1015,35 @@ mod tests {
         };
         assert_eq!(detail("devin"), "acme/web");
         assert_eq!(detail("claude"), "Default provider · acme/web");
+    }
+
+    #[test]
+    fn a_profiled_provider_is_not_badged_as_the_default() {
+        let fake = FakeAgents::fixture();
+        let mut store = store(&fake);
+        store.status.as_mut().expect("status").default_provider = Some("codex".into());
+        store
+            .providers
+            .retain(|p| !(p.id == "codex" && p.profile.is_empty()));
+        for p in &mut store.providers {
+            if p.id == "codex" {
+                p.readiness = Readiness::Connected;
+            }
+        }
+        let rows = store.rows(fake_ids::FIXTURE_NOW);
+        let choice = chosen(&store);
+        let sections = sections(&store, &rows, "release", &choice, &[]);
+        let detail = sections[0]
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Launch {
+                    provider, detail, ..
+                } if provider.id == "codex" => Some(detail.clone()),
+                _ => None,
+            })
+            .expect("launch row");
+        assert_eq!(detail, "acme/web");
     }
 
     #[test]
