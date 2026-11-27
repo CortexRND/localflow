@@ -134,6 +134,16 @@ fn overlaps(a: &[String], b: &[String]) -> bool {
     long[..short.len()] == *short
 }
 
+/// A rooted fixture path on the platform the fake runs on. Windows needs a
+/// drive root: the service's current Python rejects root-only paths.
+pub(crate) fn fixture_path(path: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{path}")
+    } else {
+        path.into()
+    }
+}
+
 /// The fake's `[agents]` settings. Secrets are not here: only each
 /// provider's `secrets[].set` presence flag, in `providers`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +163,7 @@ impl Settings {
             default_repo: "acme/web".into(),
             repos: REPOS
                 .iter()
-                .map(|alias| (alias.to_string(), format!("/srv/{alias}")))
+                .map(|alias| (alias.to_string(), fixture_path(&format!("/srv/{alias}"))))
                 .collect(),
         }
     }
@@ -482,7 +492,7 @@ fn session_value(
         "id": id, "provider": provider, "profile": profile, "state": state,
         "origin": "api", "rule_id": "", "title": title, "prompt": task,
         "repo": repo,
-        "cwd": if is_local && !repo.is_empty() { format!("/srv/{repo}") } else { String::new() },
+        "cwd": if is_local && !repo.is_empty() { fixture_path(&format!("/srv/{repo}")) } else { String::new() },
         "parent_id": "", "root_id": id,
         "external_id": if is_local { String::new() } else { format!("ext-{id}") },
         "external_url": if is_local {
@@ -1425,8 +1435,11 @@ impl FakeAgents {
             }
             inner.settings.default_repo = "localflow".into();
             inner.settings.repos = vec![
-                ("localflow".into(), "/home/you/src/localflow".into()),
-                ("website".into(), "/home/you/src/missing/website".into()),
+                ("localflow".into(), fixture_path("/home/you/src/localflow")),
+                (
+                    "website".into(),
+                    fixture_path("/home/you/src/missing/website"),
+                ),
             ];
             // Voice triggers on; "launch claude" works in localflow, "ask
             // devin" is off and uses the default workspace.
@@ -2716,7 +2729,7 @@ mod tests {
         }
         let s = fake.settings().unwrap();
         assert_eq!(s.repos.len(), REPOS.len());
-        assert_eq!(s.repos[0].path, "/srv/acme/web");
+        assert_eq!(s.repos[0].path, fixture_path("/srv/acme/web"));
         assert_eq!(fake.calls().settings, 1);
     }
 
@@ -2764,7 +2777,9 @@ mod tests {
         assert_eq!(agents::supported(&fake.status()), Some(true));
         // A default outside the list is refused, and nothing changes.
         let err = fake
-            .set_config(&json!({"agents": {"repos": ["docs=/srv/docs"]}}))
+            .set_config(
+                &json!({"agents": {"repos": [format!("docs={}", fixture_path("/srv/docs"))]}}),
+            )
             .unwrap_err();
         assert_eq!(err.code(), Some("validation"));
         assert!(err.reason().contains("default_repo"), "{}", err.reason());
@@ -2791,7 +2806,8 @@ mod tests {
                 "{bad}"
             );
         }
-        fake.set_config(&json!({"agents": {"repos": ["website=/home/you/src/missing/website", "docs=~/docs"], "default_repo": "docs", "default_provider": "devin"}}))
+        let website = fixture_path("/home/you/src/missing/website");
+        fake.set_config(&json!({"agents": {"repos": [format!("website={website}"), "docs=~/docs"], "default_repo": "docs", "default_provider": "devin"}}))
             .unwrap();
         let after = fake.settings().unwrap();
         assert_eq!(after.default_provider, "devin");
@@ -3059,7 +3075,7 @@ mod tests {
         );
         fake.update_rule(RULE_ASK, &json!({"enabled": true}))
             .unwrap();
-        fake.set_config(&json!({"agents": {"repos": ["localflow=/home/you/src/localflow"]}}))
+        fake.set_config(&json!({"agents": {"repos": [format!("localflow={}", fixture_path("/home/you/src/localflow"))]}}))
             .unwrap();
         fake.with(|inner| inner.rules[1]["repo"] = json!("website"));
         assert_eq!(

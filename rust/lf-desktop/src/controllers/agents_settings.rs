@@ -427,16 +427,14 @@ pub fn alias_key(alias: &str) -> String {
         .join(" ")
 }
 
-/// Python's `ntpath.isabs`: rooted at the current drive (`/srv` or
-/// `\srv`) or a drive/UNC path. Rust's `Path::is_absolute` is stricter
-/// for root-only Windows paths, so don't use it there.
+/// Python 3.13's `ntpath.isabs`: a drive-rooted or UNC/device path.
+/// Root-only paths (`/srv`, `\srv`) were accepted by older Python's legacy
+/// behavior but are rejected now, so don't accept them here either.
 fn windows_absolute(path: &str) -> bool {
     let bytes = path.as_bytes();
-    matches!(bytes.first(), Some(b'/' | b'\\'))
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'))
+    let slash = |b: u8| matches!(b, b'/' | b'\\');
+    (bytes.len() >= 2 && slash(bytes[0]) && slash(bytes[1]))
+        || (bytes.len() >= 3 && bytes[1] == b':' && slash(bytes[2]))
 }
 
 /// Absolute after `~` expansion (the service's `isabs(expanduser(path))`),
@@ -593,6 +591,17 @@ mod tests {
         .unwrap()
     }
 
+    /// `path` written absolute on the test platform (the input starts with
+    /// `/`); Windows gets a drive root because root-only paths are not
+    /// absolute to the service's current Python.
+    fn abs(path: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{path}")
+        } else {
+            path.into()
+        }
+    }
+
     fn settings() -> AgentSettings {
         parse_settings(&json!({
             "api_version": 1, "enabled": true, "hot_commands": false, "sandbox": false,
@@ -629,10 +638,14 @@ mod tests {
     /// strict.
     #[test]
     fn a_control_character_path_round_trips() {
+        let tabbed = abs("/srv/a\tb");
+        let bell = abs("/srv/x\u{7}y");
+        let web = abs("/srv/web");
+        let docs = abs("/srv/docs");
         let s = parse_settings(&json!({"api_version": 1, "default_repo": "", "repos": [
-            {"alias": "tabbed", "path": "/srv/a\tb", "exists": true},
-            {"alias": "bell", "path": "/srv/x\u{7}y", "exists": true},
-            {"alias": "web", "path": "/srv/web", "exists": true},
+            {"alias": "tabbed", "path": tabbed, "exists": true},
+            {"alias": "bell", "path": bell, "exists": true},
+            {"alias": "web", "path": web, "exists": true},
             {"alias": "bad\talias", "path": "/srv/z", "exists": true},
             {"alias": "nul", "path": "/srv/a\u{0}b", "exists": true},
             {"alias": "cr", "path": "/srv/a\rb", "exists": true},
@@ -645,20 +658,20 @@ mod tests {
         assert_eq!(
             shown,
             [
-                ("tabbed", "/srv/a\tb"),
-                ("bell", "/srv/x\u{7}y"),
-                ("web", "/srv/web")
+                ("tabbed", tabbed.as_str()),
+                ("bell", bell.as_str()),
+                ("web", web.as_str())
             ]
         );
         assert_eq!(
             repos_remove_patch(&s, "web"),
-            json!({"agents": {"repos": ["tabbed=/srv/a\tb", "bell=/srv/x\u{7}y"]}})
+            json!({"agents": {"repos": [repo_entry("tabbed", &tabbed), repo_entry("bell", &bell)]}})
         );
         assert_eq!(
-            repos_add_patch(&s, "docs", "/srv/docs")["agents"]["repos"][0],
-            "tabbed=/srv/a\tb"
+            repos_add_patch(&s, "docs", &docs)["agents"]["repos"][0],
+            repo_entry("tabbed", &tabbed)
         );
-        assert!(absolute_folder("/srv/a\tb"), "the add check agrees");
+        assert!(absolute_folder(&tabbed), "the add check agrees");
     }
 
     #[test]
@@ -827,10 +840,10 @@ mod tests {
 
     #[test]
     fn windows_absolute_follows_python_not_rust() {
-        for path in ["/srv/docs", r"\srv\docs", "C:/src/docs", r"C:\src\docs"] {
+        for path in ["//srv/docs", r"\\srv\docs", "C:/src/docs", r"C:\src\docs"] {
             assert!(windows_absolute(path), "absolute");
         }
-        for path in ["C:relative", "srv/docs", ""] {
+        for path in ["/srv/docs", r"\srv\docs", "C:relative", "srv/docs", ""] {
             assert!(!windows_absolute(path), "relative");
         }
     }
@@ -838,22 +851,23 @@ mod tests {
     #[test]
     fn workspace_checks_in_order_with_exact_copy() {
         let s = settings();
+        let docs = abs("/srv/docs");
         assert_eq!(
-            validate_workspace(" docs ", " /srv/docs ", &s.repos),
-            Ok(("docs".into(), "/srv/docs".into()))
+            validate_workspace(" docs ", &format!(" {docs} "), &s.repos),
+            Ok(("docs".into(), docs))
         );
         assert_eq!(
-            validate_workspace("~home", "/x", &s.repos),
+            validate_workspace("~home", &abs("/x"), &s.repos),
             Err(BAD_NAME.into())
         );
         for bad in ["", "Docs", "-docs", "docs/web", &"a".repeat(41)] {
             assert_eq!(
-                validate_workspace(bad, "/x", &[]),
+                validate_workspace(bad, &abs("/x"), &[]),
                 Err(BAD_NAME.into()),
                 "{bad}"
             );
         }
-        assert!(validate_workspace(&"a".repeat(40), "/x", &[]).is_ok());
+        assert!(validate_workspace(&"a".repeat(40), &abs("/x"), &[]).is_ok());
         assert!(validate_workspace("my repo_2-x", "~/src", &[]).is_ok());
         for bad in ["", "src/docs", "./docs", "/a\nb"] {
             assert_eq!(
@@ -865,16 +879,16 @@ mod tests {
         let full: Vec<RepoEntry> = (0..32)
             .map(|i| RepoEntry {
                 alias: format!("r{i}"),
-                path: "/x".into(),
+                path: abs("/x"),
                 exists: true,
             })
             .collect();
         assert_eq!(
-            validate_workspace("docs", "/x", &full),
+            validate_workspace("docs", &abs("/x"), &full),
             Err("You can have up to 32 workspaces.".into())
         );
         assert_eq!(
-            validate_workspace("my_api", "/x", &s.repos),
+            validate_workspace("my_api", &abs("/x"), &s.repos),
             Err("There's already a workspace called \u{201c}my-api\u{201d}.".into()),
             "the service's duplicate rule"
         );

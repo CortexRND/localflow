@@ -9,7 +9,7 @@ use gpui::{px, size};
 use super::*;
 use crate::controllers::agents::AgentsBackend;
 use crate::controllers::agents_triggers::{self as triggers, TestShown};
-use crate::sandbox::agents::{RULE_ASK, RULE_LAUNCH};
+use crate::sandbox::agents::{fixture_path, RULE_ASK, RULE_LAUNCH};
 
 fn open_rule(agents: &Entity<AgentsSettings>, id: Option<&str>, cx: &mut VisualTestContext) {
     let id = id.map(str::to_owned);
@@ -218,7 +218,7 @@ fn refusals_land_under_the_buttons(cx: &mut TestAppContext) {
     );
     fake.rules_local_only(false);
     // The workspace was removed at the service meanwhile.
-    fake.set_config(&json!({"agents": {"repos": ["localflow=/home/you/src/localflow"]}}))
+    fake.set_config(&json!({"agents": {"repos": [format!("localflow={}", fixture_path("/home/you/src/localflow"))]}}))
         .unwrap();
     agents.update(cx, |a, cx| {
         a.choose_rule_repo("website", cx);
@@ -468,7 +468,7 @@ fn the_limit_and_a_removed_workspace_are_shown(cx: &mut TestAppContext) {
     let (_shell, cx, _dir, _fake, agents) = open_tab(cx, |f| {
         f.use_settings_fixture();
         f.set_config(
-            &json!({"agents": {"repos": ["website=/home/you/src/missing/website"],
+            &json!({"agents": {"repos": [format!("website={}", fixture_path("/home/you/src/missing/website"))],
             "default_repo": ""}}),
         )
         .unwrap();

@@ -14,7 +14,7 @@ use crate::controllers::agents::{AgentsError, Provider, Readiness};
 use crate::controllers::agents_settings as model;
 use crate::controllers::settings::Tab;
 use crate::pages::settings_agents::{AgentsSettings, KeyTarget, Row};
-use crate::sandbox::agents::FakeAgents;
+use crate::sandbox::agents::{fixture_path, FakeAgents};
 
 const PLANTED: &str = "sk-planted-settings-secret-0123456789";
 
@@ -331,7 +331,7 @@ fn removing_the_default_workspace_sends_one_combined_patch(cx: &mut TestAppConte
     assert_eq!(
         fake.config_bodies(),
         [
-            json!({"agents": {"repos": ["website=/home/you/src/missing/website"], "default_repo": ""}})
+            json!({"agents": {"repos": [format!("website={}", fixture_path("/home/you/src/missing/website"))], "default_repo": ""}})
         ]
     );
     agents.read_with(cx, |a, _| {
@@ -347,14 +347,16 @@ fn removing_the_default_workspace_sends_one_combined_patch(cx: &mut TestAppConte
 #[gpui::test]
 fn adding_a_workspace_checks_then_sends_the_whole_list(cx: &mut TestAppContext) {
     let (_shell, cx, _dir, fake, agents) = open_tab(cx, FakeAgents::use_settings_fixture);
+    let docs = fixture_path("/srv/docs");
+    let site = fixture_path("/srv/site");
     agents.update(cx, |a, cx| {
-        a.type_workspace("Docs", "/srv/docs", cx);
+        a.type_workspace("Docs", &docs, cx);
         a.add_workspace(cx);
         assert_eq!(a.error(&Row::AddWorkspace), Some(model::BAD_NAME));
         a.type_workspace("docs", "relative/docs", cx);
         a.add_workspace(cx);
         assert_eq!(a.error(&Row::AddWorkspace), Some(model::NOT_ABSOLUTE));
-        a.type_workspace("website", "/srv/site", cx);
+        a.type_workspace("website", &site, cx);
         a.add_workspace(cx);
         assert_eq!(
             a.error(&Row::AddWorkspace),
@@ -364,16 +366,16 @@ fn adding_a_workspace_checks_then_sends_the_whole_list(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert_eq!(fake.calls().set_config, 0, "client checks only so far");
     agents.update(cx, |a, cx| {
-        a.type_workspace("docs", "/srv/docs", cx);
+        a.type_workspace("docs", &docs, cx);
         a.add_workspace(cx);
     });
     cx.run_until_parked();
     assert_eq!(
         fake.config_bodies(),
         [json!({"agents": {"repos": [
-            "localflow=/home/you/src/localflow",
-            "website=/home/you/src/missing/website",
-            "docs=/srv/docs",
+            format!("localflow={}", fixture_path("/home/you/src/localflow")),
+            format!("website={}", fixture_path("/home/you/src/missing/website")),
+            format!("docs={docs}"),
         ]}})]
     );
     agents.read_with(cx, |a, _| {
