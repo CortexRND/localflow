@@ -94,7 +94,7 @@ speech recognition stay local.
 Download the installer for the pinned release, check its SHA-256, then run it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.4/install.sh && echo "994028c75f6437c0f2e84a4fc9a18ffdd8d2470e1f0cd9912e67709c31e91da9  install.sh" | if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi && bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.4/install.sh && echo "994028c75f6437c0f2e84a4fc9a18ffdd8d2470e1f0cd9912e67709c31e91da9  install.sh" | sh -c 'if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi' && bash install.sh
 ```
 
 (The check uses `sha256sum -c -` when available and falls back to
@@ -103,7 +103,7 @@ transcript cleanup, use the same chain with `bash install.sh --with-ollama` as
 the final command:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.4/install.sh && echo "994028c75f6437c0f2e84a4fc9a18ffdd8d2470e1f0cd9912e67709c31e91da9  install.sh" | if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi && bash install.sh --with-ollama
+curl -fsSLO https://raw.githubusercontent.com/CortexRND/localflow/v0.2.4/install.sh && echo "994028c75f6437c0f2e84a4fc9a18ffdd8d2470e1f0cd9912e67709c31e91da9  install.sh" | sh -c 'if command -v sha256sum >/dev/null 2>&1; then sha256sum -c -; else shasum -a 256 -c -; fi' && bash install.sh --with-ollama
 ```
 
 The installer is pinned to release `v0.2.4`. Whether or not git is installed,
