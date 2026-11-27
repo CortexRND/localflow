@@ -1,0 +1,6 @@
+{"cell": "set-migrate-v1", "error": null, "llm_calls": 0}
+
+ignoring unknown v1 config key 'favorite_color'
+ignoring unknown v1 config key 'favorite_color'
+keyring unavailable: No recommended backend was available. Install a recommended 3rd party backend package; or, install the keyrings.alt package if you want to use the non-recommended backends. See https://pypi.org/project/keyring for details.
+keyring unavailable; using the existing fireworks API key environment variable

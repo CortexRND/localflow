@@ -1,0 +1,29 @@
+{
+ "cell": "dict-format-punctuation",
+ "suite": "dictation",
+ "kind": "formatting",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T09:59:34",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "outputs": [
+  {
+   "text": "Dear team comma\nthe build is green period",
+   "output": "Dear team,\nThe build is green."
+  },
+  {
+   "text": "is this working question mark",
+   "output": "is this working?"
+  },
+  {
+   "text": "Hello team comma. How are you question mark.",
+   "output": "Hello team, How are you?"
+  }
+ ],
+ "finished": "2026-11-24T09:59:34"
+}

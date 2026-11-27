@@ -17,6 +17,13 @@ PAGES = (
     "meetings", "prompts", "models", "settings", "setup",
 )
 SIZES = ((1280, 850), (960, 640))
+# Opt-in speaker-label scenes (`--sandbox-fixture`), captured after PAGES in their own
+# sandbox directory so the default sandbox and its captures stay as they are. Each opens
+# a real page and performs one real action there (rust/lf-desktop/src/sandbox.rs).
+SPEAKER_SURFACES = ("speakers-saved", "speakers-recent", "speakers-settings", "speakers-people")
+# lf-desktop prints this once a scene's real end state is rendered (fixture runs only).
+SCENE_READY = "lf-desktop: scene ready: {}"
+SCENE_TIMEOUT_SECONDS = 20
 # GPUI 0.2 on X11 reads this before Xft.dpi and RandR, so it pins captures to scale 1.
 SCALE_ENV = "GPUI_X11_SCALE_FACTOR"
 # rust/lf-desktop/src/main.rs prints this before falling back to Home for an unknown --page.
@@ -78,7 +85,8 @@ def window_manager():
 
 
 @contextmanager
-def sandbox_window(binary, sandbox, *route):
+def sandbox_window(binary, sandbox, *route, scene=None):
+    """Open a sandbox window; with ``scene``, also wait until it reports that scene ready."""
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
     env[SCALE_ENV] = "1"
@@ -124,6 +132,13 @@ def sandbox_window(binary, sandbox, *route):
         require_unit_scale(wait_for(started_environ, "the sandbox process environment", timeout=5))
         window = wait_for(mapped_window, "the GPUI sandbox window")
         require_known_page()
+        if scene is not None:
+            def ready():
+                if process.poll() is not None:
+                    raise RuntimeError(f"Sandbox exited before scene {scene} was ready ({process.returncode})")
+                return scene_ready(output(), scene)
+
+            wait_for(ready, f"scene {scene} to render its real view", timeout=SCENE_TIMEOUT_SECONDS)
         yield window
         xdotool("windowactivate", "--sync", window)
         xdotool("key", "ctrl+q")
@@ -140,6 +155,11 @@ def rejected_page(stderr_text):
     """Return the --page name lf-desktop said it does not know, or None."""
     match = UNKNOWN_PAGE.search(stderr_text)
     return match.group(1) if match else None
+
+
+def scene_ready(stderr_text, scene):
+    """True only when lf-desktop reported exactly this scene's real end state on its own line."""
+    return SCENE_READY.format(scene) in stderr_text.splitlines()
 
 
 def process_environ(pid):
@@ -268,6 +288,26 @@ def record(output, paths):
         raise RuntimeError(f"Captures share identical pixels: {groups}")
 
 
+def capture_sizes(window, output, name, theme):
+    paths = []
+    previous = None
+    for width, height in SIZES:
+        path = output / f"{name}-{theme}-{width}x{height}.png"
+        capture(window, path, theme, width, height, previous)
+        paths.append(path)
+        previous = path
+    return paths
+
+
+def speaker_scenes():
+    """(capture name, extra lf-desktop arguments) of each speaker-label scene."""
+    return [(scene, ["--sandbox-fixture", scene]) for scene in SPEAKER_SURFACES]
+
+
+def expected_captures():
+    return (len(PAGES) + len(SPEAKER_SURFACES)) * len(SIZES) * 2
+
+
 def main():
     args = arguments(__doc__)
     output = args.output.resolve()
@@ -279,14 +319,15 @@ def main():
                 for page in PAGES:
                     route = ["--setup"] if page == "setup" else ["--page", page]
                     with sandbox_window(args.binary, Path(scratch) / "sandbox", *route) as window:
-                        previous = None
-                        for width, height in SIZES:
-                            path = output / f"{page}-{theme}-{width}x{height}.png"
-                            capture(window, path, theme, width, height, previous)
-                            paths.append(path)
-                            previous = path
+                        paths += capture_sizes(window, output, page, theme)
+                for name, route in speaker_scenes():
+                    sandbox = Path(scratch) / "sandbox-speakers"
+                    with sandbox_window(args.binary, sandbox, *route, scene=name) as window:
+                        paths += capture_sizes(window, output, name, theme)
     record(output, paths)
-    print(f"Gate 8 captured {len(PAGES) * len(SIZES) * 2} distinct PNGs for review ({output}/manifest.json)")
+    if len(paths) != expected_captures():
+        raise RuntimeError(f"Gate 8 expected {expected_captures()} captures, made {len(paths)}")
+    print(f"Gate 8 captured {len(paths)} distinct PNGs for review ({output}/manifest.json)")
 
 
 if __name__ == "__main__":

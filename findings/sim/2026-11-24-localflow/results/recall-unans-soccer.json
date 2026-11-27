@@ -1,0 +1,71 @@
+{
+ "cell": "recall-unans-soccer",
+ "suite": "recall_ask",
+ "kind": "unanswerable",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:38",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "now": "2026-11-24T10:01:38",
+ "seed": {
+  "dictations": 8,
+  "files": [
+   "2026-11-21 0701 Roadmap sync.md",
+   "2026-11-21 0701 Roadmap sync (transcript).md",
+   "2026-11-09 0701 Vendor security review.md",
+   "2026-11-09 0701 Vendor security review (transcript).md"
+  ]
+ },
+ "no_answer": "I couldn't find that in your history.",
+ "corpus": {
+  "dictation": 8,
+  "meeting": 2,
+  "notes": 2
+ },
+ "time_filter": "Any time",
+ "since": null,
+ "sources": null,
+ "turns": [
+  {
+   "q": "What was the final score of the company soccer match?",
+   "retrieved": [],
+   "stale_retrieved": 0,
+   "ask": {
+    "answer": "I couldn't find that in your history.",
+    "citations": [],
+    "error": ""
+   },
+   "api": {
+    "status": 200,
+    "answer": "I couldn't find that in your history.",
+    "citations": []
+   },
+   "api_search": {
+    "status": 200,
+    "answer": null,
+    "citations": []
+   }
+  }
+ ],
+ "model_turns": 1,
+ "llm_calls": [],
+ "api_llm_calls": [],
+ "http": [
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "secs": 0.01
+  },
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "secs": 0.0
+  }
+ ],
+ "finished": "2026-11-24T10:01:38"
+}

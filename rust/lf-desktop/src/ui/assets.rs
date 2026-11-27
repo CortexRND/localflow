@@ -60,6 +60,7 @@ icons!(
     "play",
     "sparkles",
     "circle",
+    "user-round",
 );
 
 pub const BRAND: &[u8] = include_bytes!("../../assets/brand.svg");
@@ -94,7 +95,10 @@ mod tests {
 
     #[test]
     fn every_icon_used_by_pages_is_embedded() {
-        for page in crate::page::Page::ALL {
+        for page in crate::page::Page::ALL
+            .into_iter()
+            .chain([crate::page::Page::People])
+        {
             assert!(
                 ICONS.iter().any(|(n, _)| *n == page.icon()),
                 "{}",

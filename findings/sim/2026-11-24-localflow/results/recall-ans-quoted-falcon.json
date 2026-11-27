@@ -1,0 +1,155 @@
+{
+ "cell": "recall-ans-quoted-falcon",
+ "suite": "recall_ask",
+ "kind": "answerable",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:27",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "now": "2026-11-24T10:01:28",
+ "seed": {
+  "dictations": 8,
+  "files": [
+   "2026-11-21 0701 Roadmap sync.md",
+   "2026-11-21 0701 Roadmap sync (transcript).md",
+   "2026-11-09 0701 Vendor security review.md",
+   "2026-11-09 0701 Vendor security review (transcript).md"
+  ]
+ },
+ "no_answer": "I couldn't find that in your history.",
+ "corpus": {
+  "dictation": 8,
+  "meeting": 2,
+  "notes": 2
+ },
+ "time_filter": "Any time",
+ "since": null,
+ "sources": null,
+ "turns": [
+  {
+   "q": "What did we decide about \"project falcon\"?",
+   "retrieved": [
+    {
+     "source": "meeting",
+     "title": "Roadmap sync",
+     "ts": 1795244460.0,
+     "text": "**00:00** **Me:** Let's talk about project falcon and the launch plan.\n**00:20** **Others:** For project falcon we decided to launch the beta on March 12th.\n**00:40** **Others:** Nadia owns the beta launch checklist.\n**01:00** **Me:** And we agreed to drop Windows 8 support entirely.\n**01:20** **Others:** The analytics dashboard slips to the following quarter."
+    },
+    {
+     "source": "notes",
+     "title": "Roadmap sync",
+     "ts": 1795244460.0,
+     "text": "# Roadmap sync\n## Summary\nRoadmap sync covering the falcon beta timeline and platform support.\n## Follow-ups\n- Budget ceiling for the beta marketing push is 15,000 euros (from the finance email, not discussed live).\nRaw transcript: [[2026-11-21 0701 Roadmap sync (transcript)]]"
+    }
+   ],
+   "stale_retrieved": 0,
+   "ask": {
+    "answer": "We decided to launch the project falcon beta on March 12th, with Nadia owning the beta launch checklist, and to drop Windows 8 support entirely [1]. The analytics dashboard slips to the following quarter [1].",
+    "citations": [
+     {
+      "n": 1,
+      "source": "meeting",
+      "title": "Roadmap sync",
+      "app": "",
+      "when": "2026-11-21T07:01",
+      "snippet": "**00:00** **Me:** Let's talk about project falcon and the launch plan. **00:20** **Others:** For project falcon we decided to launch the beta on March 12th. **00:40** **Others:** Nadia owns the beta l\u2026",
+      "ref": "/tmp/lfsim-recall-ans-quoted-falcon-u4xjfbl2/vault/notes/transcripts/Other/2026-11-21 0701 Roadmap sync (transcript).md#00:00"
+     },
+     {
+      "n": 2,
+      "source": "notes",
+      "title": "Roadmap sync",
+      "app": "",
+      "when": "2026-11-21T07:01",
+      "snippet": "# Roadmap sync ## Summary Roadmap sync covering the falcon beta timeline and platform support. ## Follow-ups - Budget ceiling for the beta marketing push is 15,000 euros (from the finance email, not d\u2026",
+      "ref": "/tmp/lfsim-recall-ans-quoted-falcon-u4xjfbl2/vault/notes/meetings/Other/2026-11-21 0701 Roadmap sync.md"
+     }
+    ],
+    "error": ""
+   },
+   "api": {
+    "status": 200,
+    "answer": "For project falcon, we decided to launch the beta on March 12th, with Nadia owning the beta launch checklist, and we agreed to drop Windows 8 support entirely. The analytics dashboard also slipped to the following quarter [1].",
+    "citations": [
+     {
+      "n": 1,
+      "source": "meeting",
+      "title": "Roadmap sync",
+      "app": "",
+      "when": "2026-11-21T07:01",
+      "snippet": "**00:00** **Me:** Let's talk about project falcon and the launch plan. **00:20** **Others:** For project falcon we decided to launch the beta on March 12th. **00:40** **Others:** Nadia owns the beta l\u2026",
+      "ref": "/tmp/lfsim-recall-ans-quoted-falcon-u4xjfbl2/vault/notes/transcripts/Other/2026-11-21 0701 Roadmap sync (transcript).md#00:00"
+     },
+     {
+      "n": 2,
+      "source": "notes",
+      "title": "Roadmap sync",
+      "app": "",
+      "when": "2026-11-21T07:01",
+      "snippet": "# Roadmap sync ## Summary Roadmap sync covering the falcon beta timeline and platform support. ## Follow-ups - Budget ceiling for the beta marketing push is 15,000 euros (from the finance email, not d\u2026",
+      "ref": "/tmp/lfsim-recall-ans-quoted-falcon-u4xjfbl2/vault/notes/meetings/Other/2026-11-21 0701 Roadmap sync.md"
+     }
+    ]
+   },
+   "api_search": {
+    "status": 200,
+    "answer": null,
+    "citations": [
+     {
+      "n": 1,
+      "source": "meeting",
+      "title": "Roadmap sync",
+      "app": "",
+      "when": "2026-11-21T07:01",
+      "snippet": "**00:00** **Me:** Let's talk about project falcon and the launch plan. **00:20** **Others:** For project falcon we decided to launch the beta on March 12th. **00:40** **Others:** Nadia owns the beta l\u2026",
+      "ref": "/tmp/lfsim-recall-ans-quoted-falcon-u4xjfbl2/vault/notes/transcripts/Other/2026-11-21 0701 Roadmap sync (transcript).md#00:00"
+     },
+     {
+      "n": 2,
+      "source": "notes",
+      "title": "Roadmap sync",
+      "app": "",
+      "when": "2026-11-21T07:01",
+      "snippet": "# Roadmap sync ## Summary Roadmap sync covering the falcon beta timeline and platform support. ## Follow-ups - Budget ceiling for the beta marketing push is 15,000 euros (from the finance email, not d\u2026",
+      "ref": "/tmp/lfsim-recall-ans-quoted-falcon-u4xjfbl2/vault/notes/meetings/Other/2026-11-21 0701 Roadmap sync.md"
+     }
+    ]
+   }
+  }
+ ],
+ "model_turns": 1,
+ "llm_calls": [
+  {
+   "system": "",
+   "prompt": "Conversation so far (context only, not source evidence; old citation numbers do not apply to this question):\n\n\nYou answer questions about the user's own past dictations, meetings and notes. Use ONLY the numbered passages below. Be concise (a few sentences). Cite the passages you used like [2]. Never guess or add outside knowledge. If the passages do not contain the answer, reply with exactly: I couldn't find that in your history.\n\nPassages:\n[1] (2026-11-21 07:01 \u00b7 meeting \u00b7 Roadmap sync)\n<<<\n**00:00** **Me:** Let's talk about project falcon and the launch plan.\n**00:20** **Others:** For project falcon we decided to launch the beta on March 12th.\n**00:40** **Others:** Nadia owns the beta launch checklist.\n**01:00** **Me:** And we agreed to drop Windows 8 support entirely.\n**01:20** **Others:** The analytics dashboard slips to the following quarter.\n>>>\n\n[2] (2026-11-21 07:01 \u00b7 notes \u00b7 Roadmap sync)\n<<<\n# Roadmap sync\n## Summary\nRoadmap sync covering the falcon beta timeline and platform support.\n## Follow-ups\n- Budget ceiling for the beta marketing push is 15,000 euros (from the finance email, not discussed live).\nRaw transcript: [[2026-11-21 0701 Roadmap sync (transcript)]]\n>>>\n\nQuestion: What did we decide about \"project falcon\"?\n",
+   "output": "We decided to launch the project falcon beta on March 12th, with Nadia owning the beta launch checklist, and to drop Windows 8 support entirely [1]. The analytics dashboard slips to the following quarter [1].",
+   "secs": 1.18
+  }
+ ],
+ "api_llm_calls": [
+  {
+   "system": "",
+   "prompt": "You answer questions about the user's own past dictations, meetings and notes. Use ONLY the numbered passages below. Be concise (a few sentences). Cite the passages you used like [2]. Never guess or add outside knowledge. If the passages do not contain the answer, reply with exactly: I couldn't find that in your history.\n\nPassages:\n[1] (2026-11-21 07:01 \u00b7 meeting \u00b7 Roadmap sync)\n<<<\n**00:00** **Me:** Let's talk about project falcon and the launch plan.\n**00:20** **Others:** For project falcon we decided to launch the beta on March 12th.\n**00:40** **Others:** Nadia owns the beta launch checklist.\n**01:00** **Me:** And we agreed to drop Windows 8 support entirely.\n**01:20** **Others:** The analytics dashboard slips to the following quarter.\n>>>\n\n[2] (2026-11-21 07:01 \u00b7 notes \u00b7 Roadmap sync)\n<<<\n# Roadmap sync\n## Summary\nRoadmap sync covering the falcon beta timeline and platform support.\n## Follow-ups\n- Budget ceiling for the beta marketing push is 15,000 euros (from the finance email, not discussed live).\nRaw transcript: [[2026-11-21 0701 Roadmap sync (transcript)]]\n>>>\n\nQuestion: What did we decide about \"project falcon\"?\n",
+   "output": "For project falcon, we decided to launch the beta on March 12th, with Nadia owning the beta launch checklist, and we agreed to drop Windows 8 support entirely. The analytics dashboard also slipped to the following quarter [1].",
+   "secs": 1.32
+  }
+ ],
+ "http": [
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "secs": 1.33
+  },
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "secs": 0.01
+  }
+ ],
+ "finished": "2026-11-24T10:01:30"
+}

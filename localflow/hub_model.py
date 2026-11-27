@@ -337,6 +337,41 @@ def meeting_capture_status(session: dict) -> str:
     return "Recording your mic only."
 
 
+MEETING_DIARIZATION_REASON_MAX = 160
+MEETING_DIARIZATION_LINE_H = 16  # same 12pt line as the meeting error
+
+
+def meeting_diarization_status(session: dict) -> str:
+    """Live speaker-label line for a running meeting, "" when there is none.
+
+    "off", a missing key or anything unknown shows nothing, so a meeting
+    without diarization looks exactly as before. The failure reason is
+    untrusted text: whitespace is collapsed to one line, the trailing period
+    dropped, and what is left is escaped and bounded by `safe_text`.
+    """
+    if not isinstance(session, dict):
+        return ""
+    state = session.get("diarization")
+    if state == "collecting":
+        return "Speaker labels: collecting"
+    if state != "unavailable":
+        return ""
+    error = session.get("diarization_error")
+    reason = " ".join(error.split()).rstrip(". ") if isinstance(error, str) else ""
+    reason = safe_text(reason, MEETING_DIARIZATION_REASON_MAX)
+    if not reason:
+        return "Speaker labels: unavailable"
+    return f"Speaker labels: unavailable ({reason})"
+
+
+def meeting_diarization_height(text: str, width: float, measure) -> int:
+    """Wrapped height of the speaker-label line, 0 when there is none."""
+    if not text:
+        return 0
+    lines = wrap_lines(text, max(width - 8, 40), measure)
+    return max(1, len(lines)) * MEETING_DIARIZATION_LINE_H + 2
+
+
 _STAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2} \d{4}\s+")
 
 
@@ -366,25 +401,55 @@ _HEAD_BYTES = 4096
 _FILE_STAMP = re.compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2})(\d{2})(?:\s+(.*))?$")
 
 
-def _note_heading(path: Path) -> str:
-    """The note's '# Title' line (after any frontmatter), or ''."""
+# Same format as diarization.store.valid_meeting_id (32 lowercase hex), as
+# ObsidianWriter writes it: double-quoted, also accepted single-quoted or bare.
+# Matched on the whole raw line, so an indented (nested) key never counts.
+_MEETING_ID_LINE = re.compile(
+    r"meeting_id:[ \t]*(?:\"([0-9a-f]{32})\"|'([0-9a-f]{32})'|([0-9a-f]{32}))[ \t]*"
+)
+
+
+def _frontmatter_meeting_id(lines) -> str | None:
+    for line in lines:
+        match = _MEETING_ID_LINE.fullmatch(line)
+        if match:
+            return next(group for group in match.groups() if group)
+    return None
+
+
+def _note_head(path: Path) -> tuple[str, str | None]:
+    """(the note's '# Title' after any frontmatter or '', its frontmatter
+    `meeting_id` or None), from one bounded read of the file's head."""
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             head = handle.read(_HEAD_BYTES)
     except OSError:
-        return ""
+        return "", None
     lines = head.splitlines()
-    if lines and lines[0].strip() == "---":
+    meeting_id = None
+    if lines and lines[0].rstrip() == "---":
+        frontmatter = lines[1:]
         for index in range(1, len(lines)):
-            if lines[index].strip() == "---":
+            if lines[index].rstrip() == "---":
+                frontmatter = lines[1:index]
                 lines = lines[index + 1:]
                 break
+        else:
+            # Only treat an unclosed fence as truncated frontmatter when the
+            # read actually filled the head buffer (e.g. a long `speakers:`
+            # line pushes the closing `---` past _HEAD_BYTES).
+            if len(head) == _HEAD_BYTES:
+                if not head.endswith(("\n", "\r")):
+                    frontmatter = frontmatter[:-1]
+            else:
+                frontmatter = []
+        meeting_id = _frontmatter_meeting_id(frontmatter)
     for line in lines:
         if line.startswith("# "):
-            return line[2:].strip()
+            return line[2:].strip(), meeting_id
         if line.strip():
-            return ""
-    return ""
+            return "", meeting_id
+    return "", meeting_id
 
 
 def _note_when(path: Path, mtime: float) -> datetime:
@@ -411,16 +476,17 @@ def recent_notes(
     vault_path, notes_folder: str, *, limit: int = RECENT_NOTES_LIMIT,
     now: datetime | None = None,
 ) -> tuple[list[dict], str]:
-    """The newest saved meeting notes: ([{title, date_label, path}], error).
+    """The newest saved meeting notes: ([{title, date_label, path, meeting_id}], error).
 
     Same storage the CLI's `lf notes` and recall read: Markdown files under
     <vault>/<notes_folder>/ as ObsidianWriter writes them
     (<category>/YYYY-MM-DD HHMM Title.md, '# Title' after the frontmatter).
     Only that folder is walked (never the whole vault), symlinks are not
     followed, anything resolving outside it is skipped, transcripts are
-    excluded, and only the `limit` newest files are opened for their heading.
-    A missing folder is simply "no notes yet"; an unreadable one is a friendly
-    error, never an exception.
+    excluded, and only the `limit` newest files are opened, once each, for
+    their heading and frontmatter `meeting_id` (None unless the note was saved
+    with speakers and the id is well formed). A missing folder is simply
+    "no notes yet"; an unreadable one is a friendly error, never an exception.
     """
     if not vault_path or not notes_folder:
         return [], ""
@@ -481,10 +547,12 @@ def _recent_notes_in(root: Path, limit: int, now: datetime | None):
     for when, _mtime, path in found[:limit]:
         match = _FILE_STAMP.match(path.stem)
         fallback = ((match.group(6) or "").strip() if match else "") or path.stem
+        heading, meeting_id = _note_head(path)
         notes.append({
-            "title": _note_heading(path) or fallback,
+            "title": heading or fallback,
             "date_label": note_date_label(when, now),
             "path": str(path),
+            "meeting_id": meeting_id,
         })
     return notes, ""
 
@@ -512,6 +580,11 @@ _SPEAKER_ERRORS = {
     "transcript file not found": (
         "The transcript file was moved or deleted, so speakers can't be changed."
     ),
+    "this meeting has no stored voice data": (
+        "This meeting has no stored voice data (recognition was off when saved, "
+        "or voice data was forgotten)."
+    ),
+    "speaker recognition is off": "Speaker recognition is off.",
 }
 
 
@@ -664,10 +737,24 @@ class SpeakerPanel:
         self.error = ""
         self.epoch = 0          # request/poll freshness
         self.revision = 0       # bumps on every visible change
+        # Remember (speaker recognition): offered only while `remember` is on.
+        # `remembered` holds (meeting_id, speaker_id) pairs remembered this
+        # session; the controller may share one set between panels.
+        self.remember = False
+        self.remembered = set()
+        self.last_action = ""   # the action of the last answer applied by finish
 
     @property
     def visible(self) -> bool:
         return bool(self.rows)
+
+    def is_remembered(self, speaker_id) -> bool:
+        return (self.meeting_id, speaker_id) in self.remembered
+
+    def clear_remembered(self) -> None:
+        """Drop session 'Remembered' badges (e.g. after Forget all)."""
+        self.remembered.clear()
+        self.revision += 1
 
     @property
     def can_merge(self) -> bool:
@@ -766,11 +853,57 @@ class SpeakerPanel:
         was drawn for) is not the row being renamed: a field left over from an
         older edit never overwrites the current draft.
         """
-        if self.mode != "rename" or self.busy:
+        if self.mode not in ("rename", "remember") or self.busy:
             return
         if speaker_id is not None and speaker_id != self.speaker_id:
             return
         self.draft = str(text)
+
+    def set_remember(self, on) -> None:
+        """Offer Remember (both speaker flags on) or not; off closes an open remember edit."""
+        on = bool(on)
+        if on == self.remember:
+            return
+        self.remember = on
+        if not on and self.mode == "remember" and not self.busy:
+            self._close_edit()
+            self.error = ""
+        self.revision += 1
+
+    def begin_remember(self, speaker_id, draft) -> None:
+        """Open the name prompt for Remember. `draft` is the prefill: the caller
+        passes "" for a generic label ("Speaker 2") and the label otherwise."""
+        if not self.remember or self.busy or self.row(speaker_id) is None:
+            return
+        if self.is_remembered(speaker_id):
+            return
+        self.mode = "remember"
+        self.speaker_id = speaker_id
+        self.into_id = ""
+        self.draft = str(draft or "")
+        self.error = ""
+        self.revision += 1
+
+    def submit_remember(self, name):
+        """("enroll", (name, meeting_id, speaker_id), token) or None."""
+        if self.busy or self.mode != "remember" or not self.remember:
+            return None
+        if self.is_remembered(self.speaker_id):
+            self._close_edit()
+            self.revision += 1
+            return None
+        self.draft = str(name)
+        problem = speaker_name_error(name)
+        if problem:
+            self.error = problem
+            self.revision += 1
+            return None
+        self.busy = "remember"
+        self.error = ""
+        self.epoch += 1
+        self.revision += 1
+        collapsed = " ".join(str(name).split())
+        return ("enroll", (collapsed, self.meeting_id, self.speaker_id), self.epoch)
 
     def cancel(self) -> None:
         if self.busy:
@@ -822,6 +955,16 @@ class SpeakerPanel:
         self.busy = ""
         self.epoch += 1
         self.revision += 1
+        self.last_action = action
+        if action == "remember":
+            # The answer is a voiceprint, not this meeting's speakers: rows stay.
+            if error:
+                self.error = speaker_error_text("remember", error)
+            else:
+                self.remembered.add((self.meeting_id, self.speaker_id))
+                self._close_edit()
+                self.error = ""
+            return True
         if error:
             self.error = speaker_error_text(action, error)
             return True
@@ -841,7 +984,9 @@ SPEAKER_ROW_H = RECENT_ROW_H
 SPEAKERS_CARD_Y = 28          # heading 22 + 6, as Recent meetings
 SPEAKERS_ERROR_GAP = 6
 SPEAKERS_GAP = 12             # panel -> next section
-SPEAKER_BUTTONS = {"rename": 84, "merge": 72, "save": 84, "confirm": 92, "cancel": 72}
+SPEAKER_BUTTONS = {
+    "rename": 84, "merge": 72, "save": 84, "confirm": 92, "cancel": 72, "remember": 100,
+}
 _SPEAKER_PAD = 16             # == ui_tokens.CARD_PADDING
 _SPEAKER_BUTTON_GAP = 8
 
@@ -862,8 +1007,20 @@ def meeting_speakers_layout(width: int, y: int, count: int, *, error_height: int
     return frames
 
 
-def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: bool = True) -> dict:
-    """Card-local frames of one speaker row in its normal, rename or merge state."""
+def speaker_row_frames(
+    width: int, index: int, mode: str = "", *, can_merge: bool = True, remember: bool = False,
+) -> dict:
+    """Card-local frames of one speaker row in its normal, rename or merge state.
+
+    `remember=True` adds a Remember button left of Rename in the normal row
+    (name and duration move left to make room); without it the numbers are
+    exactly the pre-recognition ones. Mode "remember" is drawn as the rename row,
+    with a submit button as wide as Remember (it reads "Remember"/"Remembering…").
+    """
+    save_w = SPEAKER_BUTTONS["save"]
+    if mode == "remember":
+        mode = "rename"
+        save_w = SPEAKER_BUTTONS["remember"]
     y0 = index * SPEAKER_ROW_H
     pad = _SPEAKER_PAD
     gap = _SPEAKER_BUTTON_GAP
@@ -878,6 +1035,10 @@ def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: boo
         rename_w = SPEAKER_BUTTONS["rename"]
         rename_x = right - rename_w
         frames["rename"] = (rename_x, by, rename_w, 28)
+        if remember:
+            remember_w = SPEAKER_BUTTONS["remember"]
+            rename_x = rename_x - gap - remember_w
+            frames["remember"] = (rename_x, by, remember_w, 28)
         duration_x = rename_x - 12 - 80
         frames["duration"] = (duration_x, y0 + 14, 80, 18)
         frames["name"] = (pad, y0 + 12, duration_x - 12 - pad, 20)
@@ -886,7 +1047,6 @@ def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: boo
     cancel_x = right - cancel_w
     frames["cancel"] = (cancel_x, by, cancel_w, 28)
     if mode == "rename":
-        save_w = SPEAKER_BUTTONS["save"]
         save_x = cancel_x - gap - save_w
         frames["save"] = (save_x, by, save_w, 28)
         frames["field"] = (pad, y0 + 6, save_x - 12 - pad, 32)
@@ -899,6 +1059,235 @@ def speaker_row_frames(width: int, index: int, mode: str = "", *, can_merge: boo
     frames["picker"] = (picker_x, by, picker_w, 28)
     frames["prompt"] = (pad, y0 + 12, picker_x - 12 - pad, 20)
     return frames
+
+
+# ------------------------------------------------- recent meetings speakers ---
+
+RECENT_SPEAKERS_W = 96
+RECENT_DATE_W = 150
+RECENT_OPEN_W = 72
+RECENT_RETRY_W = 72
+RECENT_LOADING = "Loading speakers…"
+RECENT_SPEAKERS_TITLE = "Speakers…"
+RECENT_SPEAKERS_DONE = "Done"
+_MEETING_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def speakers_not_found(error) -> bool:
+    """True when a speakers request failed with HTTP 404 (no data, or no route)."""
+    return getattr(error, "status_code", None) == 404
+
+
+def speaker_error_is_stale(error) -> bool:
+    """True when a speaker rename/merge failed because the speaker no longer exists."""
+    return str(error or "").strip().lower() == "unknown speaker"
+
+
+def recent_speakers_error_text(error) -> str:
+    """The line shown in a Recent meetings drawer when the speakers didn't load."""
+    return "Couldn't load speakers: " + safe_text(" ".join(str(error).split()), SPEAKER_ERROR_MAX)
+
+
+def recent_row_frames(width: int, y: int, *, speakers_column: bool = False) -> dict:
+    """Card-local frames of one Recent meetings row.
+
+    Without the Speakers column these are the card's original numbers, so a
+    list with no diarized meeting is drawn exactly as before.
+    """
+    open_x = width - _SPEAKER_PAD - RECENT_OPEN_W
+    frames = {"open": (open_x, y + 8, RECENT_OPEN_W, 28)}
+    right = open_x
+    if speakers_column:
+        speakers_x = open_x - _SPEAKER_BUTTON_GAP - RECENT_SPEAKERS_W
+        frames["speakers"] = (speakers_x, y + 8, RECENT_SPEAKERS_W, 28)
+        right = speakers_x
+    date_x = right - 12 - RECENT_DATE_W
+    frames["date"] = (date_x, y + 14, RECENT_DATE_W, 18)
+    frames["title"] = (_SPEAKER_PAD, y + 12, date_x - _SPEAKER_PAD - 12, 20)
+    return frames
+
+
+def recent_layout(width: int, notes, state, *, error_height: int = 0) -> dict:
+    """Rows of the Recent meetings card, the open speakers drawer, and the card height.
+
+    `error_height` is the measured height of the drawer panel's error (0 when
+    it has none). Rows below the drawer move down by its height.
+    """
+    if not notes:
+        return {"rows": [], "drawer": None, "height": RECENT_ROW_H}
+    column = any(state.shows_button(note) for note in notes)
+    rows = []
+    drawer = None
+    y = 0
+    for note in notes:
+        expanded = bool(state.path) and note.get("path") == state.path
+        rows.append({
+            "y": y,
+            "frames": recent_row_frames(width, y, speakers_column=column),
+            "show_speakers": state.shows_button(note),
+            "expanded": expanded,
+        })
+        y += RECENT_ROW_H
+        if expanded and drawer is None and state.state:
+            drawer = _recent_drawer(width, y, state, error_height)
+            y += drawer["frame"][3]
+    return {"rows": rows, "drawer": drawer, "height": y}
+
+
+def _recent_drawer(width, y, state, error_height):
+    pad = _SPEAKER_PAD
+    if state.state == "loading":
+        return {
+            "frame": (0, y, width, RECENT_ROW_H), "kind": "loading",
+            "label": (pad, 12, width - 2 * pad, 20),
+        }
+    if state.state == "error":
+        retry_x = width - pad - RECENT_RETRY_W
+        return {
+            "frame": (0, y, width, RECENT_ROW_H), "kind": "error",
+            "label": (pad, 13, retry_x - 12 - pad, 18),
+            "retry": (retry_x, 8, RECENT_RETRY_W, 28),
+        }
+    height = len(state.panel.rows) * SPEAKER_ROW_H
+    drawer = {"kind": "rows", "error": None}
+    if error_height:
+        drawer["error"] = (pad, height + SPEAKERS_ERROR_GAP, width - 2 * pad, error_height)
+        height += SPEAKERS_ERROR_GAP + error_height + 8
+    drawer["frame"] = (0, y, width, height)
+    return drawer
+
+
+class RecentSpeakers:
+    """The one Recent meetings row whose speakers are open for editing. No UI, no I/O.
+
+    Speakers load lazily when the row's Speakers… button is clicked; `seq`
+    tokens drop a load that answers after the drawer moved on. Rename and merge
+    go through `panel`, a SpeakerPanel with its own epoch. `hidden` holds the
+    meetings whose speakers turned out to be unavailable (404 or none), for
+    the controller's lifetime, so their button doesn't come back on each visit.
+    """
+
+    def __init__(self):
+        self.path = ""
+        self.meeting_id = ""
+        self.state = ""         # "" | "loading" | "error" | "ready"
+        self.load_error = ""
+        self.seq = 0
+        self.panel = SpeakerPanel()
+        self.hidden = set()
+
+    def shows_button(self, note) -> bool:
+        meeting_id = note.get("meeting_id") if isinstance(note, dict) else None
+        return (
+            isinstance(meeting_id, str) and _MEETING_ID.fullmatch(meeting_id) is not None
+            and meeting_id not in self.hidden
+        )
+
+    def is_open(self, note) -> bool:
+        return bool(self.path) and isinstance(note, dict) and note.get("path") == self.path
+
+    def _request(self):
+        return ("speakers", (self.meeting_id,), self.seq)
+
+    def toggle(self, note):
+        """Open `note`'s drawer (the load request) or close it (None)."""
+        if self.panel.busy:
+            return None
+        if self.is_open(note):
+            self.close()
+            return None
+        if not self.shows_button(note):
+            return None
+        self.path = note["path"]
+        self.meeting_id = note["meeting_id"]
+        self.state = "loading"
+        self.load_error = ""
+        self.seq += 1
+        self.panel.sync(None)
+        return self._request()
+
+    def retry(self):
+        if self.state != "error" or self.panel.busy:
+            return None
+        self.state = "loading"
+        self.load_error = ""
+        self.seq += 1
+        return self._request()
+
+    def reload(self):
+        """Re-fetch speakers for the open drawer after a stale-speaker edit."""
+        if self.state != "ready" or self.panel.busy:
+            return None
+        self.state = "loading"
+        self.load_error = ""
+        self.seq += 1
+        return self._request()
+
+    def loaded(self, token, result, error) -> bool:
+        """Apply a speakers load; False when it belongs to an older drawer."""
+        if token != self.seq or self.state != "loading":
+            return False
+        if error:
+            if speakers_not_found(error):
+                self.hidden.add(self.meeting_id)
+                self.close()
+            else:
+                self.state = "error"
+                self.load_error = recent_speakers_error_text(error)
+            return True
+        if (
+            not isinstance(result, dict)
+            or result.get("meeting_id") not in (None, self.meeting_id)
+            or not isinstance(result.get("speakers"), list)
+        ):
+            self.state = "error"
+            self.load_error = recent_speakers_error_text("unexpected response")
+            return True
+        self.panel.sync({"meeting_id": self.meeting_id, "speakers": result.get("speakers")})
+        if not self.panel.rows:
+            self.hidden.add(self.meeting_id)
+            self.close()
+            return True
+        self.state = "ready"
+        return True
+
+    def close(self) -> None:
+        self.path = ""
+        self.meeting_id = ""
+        self.state = ""
+        self.load_error = ""
+        self.seq += 1
+        self.panel.sync(None)  # new epoch: a late rename/merge answer is dropped
+
+    def reconcile(self, notes) -> None:
+        """Close the drawer when its note left the list or now names another meeting."""
+        if not self.path:
+            return
+        for note in notes or ():
+            if note.get("path") == self.path:
+                if note.get("meeting_id") == self.meeting_id and self.shows_button(note):
+                    return
+                break
+        self.close()
+
+
+def mirror_speakers(source, target, payload, error) -> bool:
+    """Copy a successful rename/merge of `source` into `target` when both show
+    the same meeting; True when `target` changed.
+
+    Authoritative (no ticket), so `target`'s epoch moves on: a status poll
+    sent before the edit can't put the old names back.
+    """
+    if getattr(source, "last_action", "") == "remember":
+        return False  # a voiceprint answer, not speakers: syncing it would wipe `target`
+    if error or source.error or not source.meeting_id or source.meeting_id != target.meeting_id:
+        return False
+    if not isinstance(payload, dict) or payload.get("meeting_id") not in (None, source.meeting_id):
+        return False
+    if not target.sync({"meeting_id": source.meeting_id, "speakers": payload.get("speakers")}):
+        return False
+    target.epoch += 1
+    return True
 
 
 # -------------------------------------------------------------------- style ---

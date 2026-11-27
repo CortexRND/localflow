@@ -1,0 +1,1204 @@
+{
+ "cell": "set-config-roundtrip",
+ "suite": "settings_api",
+ "kind": "config_roundtrip",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:53",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "before": [
+  200,
+  {
+   "config_version": 2,
+   "stt": {
+    "provider": "auto",
+    "model": "base",
+    "language": null,
+    "device": "auto"
+   },
+   "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "fast_model": "",
+    "api_key_ref": "",
+    "cleanup_enabled": true,
+    "cleanup_timeout": 120,
+    "num_ctx": 8192
+   },
+   "cleanup": {
+    "level": "light",
+    "styles_enabled": true,
+    "style_work": "formal",
+    "style_email": "formal",
+    "style_personal": "casual",
+    "style_other": "formal",
+    "app_overrides": []
+   },
+   "hotkey": {
+    "key": "alt_l",
+    "sounds": false,
+    "paste_last": "<ctrl>+<shift>+v",
+    "command": "alt_r",
+    "polish": "<ctrl>+<alt>+1",
+    "prompt": "<ctrl>+<alt>+2",
+    "dictation_toggle": ""
+   },
+   "paste": {
+    "method": "auto"
+   },
+   "dictation": {
+    "enabled": true,
+    "spoken_symbols": true,
+    "spoken_punctuation": true,
+    "silence_threshold_dbfs": -50.0,
+    "command_names": [],
+    "skills_dirs": [
+     "~/.claude/skills",
+     "~/.agents/skills"
+    ],
+    "sample_rate": 16000,
+    "input_device": "",
+    "max_recording_seconds": 1200,
+    "pause_media": false
+   },
+   "server": {
+    "host": "127.0.0.1",
+    "port": 8756
+   },
+   "features": {
+    "meetings": false,
+    "hot_phrases": true
+   },
+   "history": {
+    "enabled": true,
+    "keep_audio_clips": 5
+   },
+   "meetings": {
+    "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+    "notes_folder": "notes/meetings",
+    "logs_folder": "notes/transcripts",
+    "watch": false,
+    "chunk_seconds": 3600,
+    "min_busy_seconds": 12,
+    "auto_start": true,
+    "work_prompts": false,
+    "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+    "orca_repo": "",
+    "orca_agent": "claude",
+    "capture_system_audio": true,
+    "system_audio_device": "",
+    "default_template": "general",
+    "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+   },
+   "setup": {
+    "version": 0
+   }
+  }
+ ],
+ "put": [
+  200,
+  {
+   "config_version": 2,
+   "stt": {
+    "provider": "auto",
+    "model": "base",
+    "language": null,
+    "device": "auto"
+   },
+   "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "fast_model": "",
+    "api_key_ref": "",
+    "cleanup_enabled": true,
+    "cleanup_timeout": 120,
+    "num_ctx": 8192
+   },
+   "cleanup": {
+    "level": "medium",
+    "styles_enabled": true,
+    "style_work": "formal",
+    "style_email": "formal",
+    "style_personal": "excited",
+    "style_other": "formal",
+    "app_overrides": []
+   },
+   "hotkey": {
+    "key": "alt_l",
+    "sounds": false,
+    "paste_last": "<ctrl>+<shift>+v",
+    "command": "alt_r",
+    "polish": "<ctrl>+<alt>+1",
+    "prompt": "<ctrl>+<alt>+2",
+    "dictation_toggle": ""
+   },
+   "paste": {
+    "method": "auto"
+   },
+   "dictation": {
+    "enabled": true,
+    "spoken_symbols": false,
+    "spoken_punctuation": true,
+    "silence_threshold_dbfs": -50.0,
+    "command_names": [],
+    "skills_dirs": [
+     "~/.claude/skills",
+     "~/.agents/skills"
+    ],
+    "sample_rate": 16000,
+    "input_device": "",
+    "max_recording_seconds": 1200,
+    "pause_media": false
+   },
+   "server": {
+    "host": "127.0.0.1",
+    "port": 8756
+   },
+   "features": {
+    "meetings": false,
+    "hot_phrases": true
+   },
+   "history": {
+    "enabled": true,
+    "keep_audio_clips": 3
+   },
+   "meetings": {
+    "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+    "notes_folder": "notes/meetings",
+    "logs_folder": "notes/transcripts",
+    "watch": false,
+    "chunk_seconds": 3600,
+    "min_busy_seconds": 12,
+    "auto_start": true,
+    "work_prompts": false,
+    "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+    "orca_repo": "",
+    "orca_agent": "claude",
+    "capture_system_audio": true,
+    "system_audio_device": "",
+    "default_template": "general",
+    "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+   },
+   "setup": {
+    "version": 0
+   },
+   "restart_required": []
+  }
+ ],
+ "after": [
+  200,
+  {
+   "config_version": 2,
+   "stt": {
+    "provider": "auto",
+    "model": "base",
+    "language": null,
+    "device": "auto"
+   },
+   "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "fast_model": "",
+    "api_key_ref": "",
+    "cleanup_enabled": true,
+    "cleanup_timeout": 120,
+    "num_ctx": 8192
+   },
+   "cleanup": {
+    "level": "medium",
+    "styles_enabled": true,
+    "style_work": "formal",
+    "style_email": "formal",
+    "style_personal": "excited",
+    "style_other": "formal",
+    "app_overrides": []
+   },
+   "hotkey": {
+    "key": "alt_l",
+    "sounds": false,
+    "paste_last": "<ctrl>+<shift>+v",
+    "command": "alt_r",
+    "polish": "<ctrl>+<alt>+1",
+    "prompt": "<ctrl>+<alt>+2",
+    "dictation_toggle": ""
+   },
+   "paste": {
+    "method": "auto"
+   },
+   "dictation": {
+    "enabled": true,
+    "spoken_symbols": false,
+    "spoken_punctuation": true,
+    "silence_threshold_dbfs": -50.0,
+    "command_names": [],
+    "skills_dirs": [
+     "~/.claude/skills",
+     "~/.agents/skills"
+    ],
+    "sample_rate": 16000,
+    "input_device": "",
+    "max_recording_seconds": 1200,
+    "pause_media": false
+   },
+   "server": {
+    "host": "127.0.0.1",
+    "port": 8756
+   },
+   "features": {
+    "meetings": false,
+    "hot_phrases": true
+   },
+   "history": {
+    "enabled": true,
+    "keep_audio_clips": 3
+   },
+   "meetings": {
+    "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+    "notes_folder": "notes/meetings",
+    "logs_folder": "notes/transcripts",
+    "watch": false,
+    "chunk_seconds": 3600,
+    "min_busy_seconds": 12,
+    "auto_start": true,
+    "work_prompts": false,
+    "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+    "orca_repo": "",
+    "orca_agent": "claude",
+    "capture_system_audio": true,
+    "system_audio_device": "",
+    "default_template": "general",
+    "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+   },
+   "setup": {
+    "version": 0
+   }
+  }
+ ],
+ "disk_after": {
+  "config_version": 2,
+  "stt": {
+   "provider": "auto",
+   "model": "base",
+   "device": "auto"
+  },
+  "llm": {
+   "provider": "openai-compatible",
+   "base_url": "https://api.fireworks.ai/inference/v1",
+   "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+   "fast_model": "",
+   "api_key_ref": "",
+   "cleanup_enabled": true,
+   "cleanup_timeout": 120,
+   "num_ctx": 8192
+  },
+  "cleanup": {
+   "level": "medium",
+   "styles_enabled": true,
+   "style_work": "formal",
+   "style_email": "formal",
+   "style_personal": "excited",
+   "style_other": "formal",
+   "app_overrides": []
+  },
+  "hotkey": {
+   "key": "alt_l",
+   "sounds": false,
+   "paste_last": "<ctrl>+<shift>+v",
+   "command": "alt_r",
+   "polish": "<ctrl>+<alt>+1",
+   "prompt": "<ctrl>+<alt>+2",
+   "dictation_toggle": ""
+  },
+  "paste": {
+   "method": "auto"
+  },
+  "dictation": {
+   "enabled": true,
+   "spoken_symbols": false,
+   "spoken_punctuation": true,
+   "silence_threshold_dbfs": -50.0,
+   "command_names": [],
+   "skills_dirs": [
+    "~/.claude/skills",
+    "~/.agents/skills"
+   ],
+   "sample_rate": 16000,
+   "input_device": "",
+   "max_recording_seconds": 1200,
+   "pause_media": false
+  },
+  "server": {
+   "host": "127.0.0.1",
+   "port": 8756
+  },
+  "features": {
+   "meetings": false,
+   "hot_phrases": true
+  },
+  "history": {
+   "enabled": true,
+   "keep_audio_clips": 3
+  },
+  "meetings": {
+   "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+   "notes_folder": "notes/meetings",
+   "logs_folder": "notes/transcripts",
+   "watch": false,
+   "chunk_seconds": 3600,
+   "min_busy_seconds": 12,
+   "auto_start": true,
+   "work_prompts": false,
+   "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+   "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+   "orca_repo": "",
+   "orca_agent": "claude",
+   "capture_system_audio": true,
+   "system_audio_device": "",
+   "default_template": "general",
+   "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+  },
+  "setup": {
+   "version": 0
+  }
+ },
+ "invalid": [
+  {
+   "name": "bad-enum",
+   "status": 400,
+   "detail": {
+    "detail": "invalid value for config key 'cleanup.level'; choose from: light, medium, none"
+   },
+   "config_after": {
+    "config_version": 2,
+    "stt": {
+     "provider": "auto",
+     "model": "base",
+     "language": null,
+     "device": "auto"
+    },
+    "llm": {
+     "provider": "openai-compatible",
+     "base_url": "https://api.fireworks.ai/inference/v1",
+     "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "fast_model": "",
+     "api_key_ref": "",
+     "cleanup_enabled": true,
+     "cleanup_timeout": 120,
+     "num_ctx": 8192
+    },
+    "cleanup": {
+     "level": "medium",
+     "styles_enabled": true,
+     "style_work": "formal",
+     "style_email": "formal",
+     "style_personal": "excited",
+     "style_other": "formal",
+     "app_overrides": []
+    },
+    "hotkey": {
+     "key": "alt_l",
+     "sounds": false,
+     "paste_last": "<ctrl>+<shift>+v",
+     "command": "alt_r",
+     "polish": "<ctrl>+<alt>+1",
+     "prompt": "<ctrl>+<alt>+2",
+     "dictation_toggle": ""
+    },
+    "paste": {
+     "method": "auto"
+    },
+    "dictation": {
+     "enabled": true,
+     "spoken_symbols": false,
+     "spoken_punctuation": true,
+     "silence_threshold_dbfs": -50.0,
+     "command_names": [],
+     "skills_dirs": [
+      "~/.claude/skills",
+      "~/.agents/skills"
+     ],
+     "sample_rate": 16000,
+     "input_device": "",
+     "max_recording_seconds": 1200,
+     "pause_media": false
+    },
+    "server": {
+     "host": "127.0.0.1",
+     "port": 8756
+    },
+    "features": {
+     "meetings": false,
+     "hot_phrases": true
+    },
+    "history": {
+     "enabled": true,
+     "keep_audio_clips": 3
+    },
+    "meetings": {
+     "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+     "notes_folder": "notes/meetings",
+     "logs_folder": "notes/transcripts",
+     "watch": false,
+     "chunk_seconds": 3600,
+     "min_busy_seconds": 12,
+     "auto_start": true,
+     "work_prompts": false,
+     "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+     "orca_repo": "",
+     "orca_agent": "claude",
+     "capture_system_audio": true,
+     "system_audio_device": "",
+     "default_template": "general",
+     "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+    },
+    "setup": {
+     "version": 0
+    }
+   }
+  },
+  {
+   "name": "unknown-section",
+   "status": 400,
+   "detail": {
+    "detail": "unknown config key 'nope'"
+   },
+   "config_after": {
+    "config_version": 2,
+    "stt": {
+     "provider": "auto",
+     "model": "base",
+     "language": null,
+     "device": "auto"
+    },
+    "llm": {
+     "provider": "openai-compatible",
+     "base_url": "https://api.fireworks.ai/inference/v1",
+     "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "fast_model": "",
+     "api_key_ref": "",
+     "cleanup_enabled": true,
+     "cleanup_timeout": 120,
+     "num_ctx": 8192
+    },
+    "cleanup": {
+     "level": "medium",
+     "styles_enabled": true,
+     "style_work": "formal",
+     "style_email": "formal",
+     "style_personal": "excited",
+     "style_other": "formal",
+     "app_overrides": []
+    },
+    "hotkey": {
+     "key": "alt_l",
+     "sounds": false,
+     "paste_last": "<ctrl>+<shift>+v",
+     "command": "alt_r",
+     "polish": "<ctrl>+<alt>+1",
+     "prompt": "<ctrl>+<alt>+2",
+     "dictation_toggle": ""
+    },
+    "paste": {
+     "method": "auto"
+    },
+    "dictation": {
+     "enabled": true,
+     "spoken_symbols": false,
+     "spoken_punctuation": true,
+     "silence_threshold_dbfs": -50.0,
+     "command_names": [],
+     "skills_dirs": [
+      "~/.claude/skills",
+      "~/.agents/skills"
+     ],
+     "sample_rate": 16000,
+     "input_device": "",
+     "max_recording_seconds": 1200,
+     "pause_media": false
+    },
+    "server": {
+     "host": "127.0.0.1",
+     "port": 8756
+    },
+    "features": {
+     "meetings": false,
+     "hot_phrases": true
+    },
+    "history": {
+     "enabled": true,
+     "keep_audio_clips": 3
+    },
+    "meetings": {
+     "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+     "notes_folder": "notes/meetings",
+     "logs_folder": "notes/transcripts",
+     "watch": false,
+     "chunk_seconds": 3600,
+     "min_busy_seconds": 12,
+     "auto_start": true,
+     "work_prompts": false,
+     "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+     "orca_repo": "",
+     "orca_agent": "claude",
+     "capture_system_audio": true,
+     "system_audio_device": "",
+     "default_template": "general",
+     "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+    },
+    "setup": {
+     "version": 0
+    }
+   }
+  },
+  {
+   "name": "unknown-key",
+   "status": 400,
+   "detail": {
+    "detail": "unknown config key 'cleanup.nope'"
+   },
+   "config_after": {
+    "config_version": 2,
+    "stt": {
+     "provider": "auto",
+     "model": "base",
+     "language": null,
+     "device": "auto"
+    },
+    "llm": {
+     "provider": "openai-compatible",
+     "base_url": "https://api.fireworks.ai/inference/v1",
+     "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "fast_model": "",
+     "api_key_ref": "",
+     "cleanup_enabled": true,
+     "cleanup_timeout": 120,
+     "num_ctx": 8192
+    },
+    "cleanup": {
+     "level": "medium",
+     "styles_enabled": true,
+     "style_work": "formal",
+     "style_email": "formal",
+     "style_personal": "excited",
+     "style_other": "formal",
+     "app_overrides": []
+    },
+    "hotkey": {
+     "key": "alt_l",
+     "sounds": false,
+     "paste_last": "<ctrl>+<shift>+v",
+     "command": "alt_r",
+     "polish": "<ctrl>+<alt>+1",
+     "prompt": "<ctrl>+<alt>+2",
+     "dictation_toggle": ""
+    },
+    "paste": {
+     "method": "auto"
+    },
+    "dictation": {
+     "enabled": true,
+     "spoken_symbols": false,
+     "spoken_punctuation": true,
+     "silence_threshold_dbfs": -50.0,
+     "command_names": [],
+     "skills_dirs": [
+      "~/.claude/skills",
+      "~/.agents/skills"
+     ],
+     "sample_rate": 16000,
+     "input_device": "",
+     "max_recording_seconds": 1200,
+     "pause_media": false
+    },
+    "server": {
+     "host": "127.0.0.1",
+     "port": 8756
+    },
+    "features": {
+     "meetings": false,
+     "hot_phrases": true
+    },
+    "history": {
+     "enabled": true,
+     "keep_audio_clips": 3
+    },
+    "meetings": {
+     "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+     "notes_folder": "notes/meetings",
+     "logs_folder": "notes/transcripts",
+     "watch": false,
+     "chunk_seconds": 3600,
+     "min_busy_seconds": 12,
+     "auto_start": true,
+     "work_prompts": false,
+     "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+     "orca_repo": "",
+     "orca_agent": "claude",
+     "capture_system_audio": true,
+     "system_audio_device": "",
+     "default_template": "general",
+     "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+    },
+    "setup": {
+     "version": 0
+    }
+   }
+  },
+  {
+   "name": "wrong-type",
+   "status": 400,
+   "detail": {
+    "detail": "invalid type for config key 'server.port'"
+   },
+   "config_after": {
+    "config_version": 2,
+    "stt": {
+     "provider": "auto",
+     "model": "base",
+     "language": null,
+     "device": "auto"
+    },
+    "llm": {
+     "provider": "openai-compatible",
+     "base_url": "https://api.fireworks.ai/inference/v1",
+     "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "fast_model": "",
+     "api_key_ref": "",
+     "cleanup_enabled": true,
+     "cleanup_timeout": 120,
+     "num_ctx": 8192
+    },
+    "cleanup": {
+     "level": "medium",
+     "styles_enabled": true,
+     "style_work": "formal",
+     "style_email": "formal",
+     "style_personal": "excited",
+     "style_other": "formal",
+     "app_overrides": []
+    },
+    "hotkey": {
+     "key": "alt_l",
+     "sounds": false,
+     "paste_last": "<ctrl>+<shift>+v",
+     "command": "alt_r",
+     "polish": "<ctrl>+<alt>+1",
+     "prompt": "<ctrl>+<alt>+2",
+     "dictation_toggle": ""
+    },
+    "paste": {
+     "method": "auto"
+    },
+    "dictation": {
+     "enabled": true,
+     "spoken_symbols": false,
+     "spoken_punctuation": true,
+     "silence_threshold_dbfs": -50.0,
+     "command_names": [],
+     "skills_dirs": [
+      "~/.claude/skills",
+      "~/.agents/skills"
+     ],
+     "sample_rate": 16000,
+     "input_device": "",
+     "max_recording_seconds": 1200,
+     "pause_media": false
+    },
+    "server": {
+     "host": "127.0.0.1",
+     "port": 8756
+    },
+    "features": {
+     "meetings": false,
+     "hot_phrases": true
+    },
+    "history": {
+     "enabled": true,
+     "keep_audio_clips": 3
+    },
+    "meetings": {
+     "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+     "notes_folder": "notes/meetings",
+     "logs_folder": "notes/transcripts",
+     "watch": false,
+     "chunk_seconds": 3600,
+     "min_busy_seconds": 12,
+     "auto_start": true,
+     "work_prompts": false,
+     "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+     "orca_repo": "",
+     "orca_agent": "claude",
+     "capture_system_audio": true,
+     "system_audio_device": "",
+     "default_template": "general",
+     "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+    },
+    "setup": {
+     "version": 0
+    }
+   }
+  },
+  {
+   "name": "foreign-key-ref",
+   "status": 400,
+   "detail": {
+    "detail": "invalid value for config key 'llm.api_key_ref'"
+   },
+   "config_after": {
+    "config_version": 2,
+    "stt": {
+     "provider": "auto",
+     "model": "base",
+     "language": null,
+     "device": "auto"
+    },
+    "llm": {
+     "provider": "openai-compatible",
+     "base_url": "https://api.fireworks.ai/inference/v1",
+     "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "fast_model": "",
+     "api_key_ref": "",
+     "cleanup_enabled": true,
+     "cleanup_timeout": 120,
+     "num_ctx": 8192
+    },
+    "cleanup": {
+     "level": "medium",
+     "styles_enabled": true,
+     "style_work": "formal",
+     "style_email": "formal",
+     "style_personal": "excited",
+     "style_other": "formal",
+     "app_overrides": []
+    },
+    "hotkey": {
+     "key": "alt_l",
+     "sounds": false,
+     "paste_last": "<ctrl>+<shift>+v",
+     "command": "alt_r",
+     "polish": "<ctrl>+<alt>+1",
+     "prompt": "<ctrl>+<alt>+2",
+     "dictation_toggle": ""
+    },
+    "paste": {
+     "method": "auto"
+    },
+    "dictation": {
+     "enabled": true,
+     "spoken_symbols": false,
+     "spoken_punctuation": true,
+     "silence_threshold_dbfs": -50.0,
+     "command_names": [],
+     "skills_dirs": [
+      "~/.claude/skills",
+      "~/.agents/skills"
+     ],
+     "sample_rate": 16000,
+     "input_device": "",
+     "max_recording_seconds": 1200,
+     "pause_media": false
+    },
+    "server": {
+     "host": "127.0.0.1",
+     "port": 8756
+    },
+    "features": {
+     "meetings": false,
+     "hot_phrases": true
+    },
+    "history": {
+     "enabled": true,
+     "keep_audio_clips": 3
+    },
+    "meetings": {
+     "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+     "notes_folder": "notes/meetings",
+     "logs_folder": "notes/transcripts",
+     "watch": false,
+     "chunk_seconds": 3600,
+     "min_busy_seconds": 12,
+     "auto_start": true,
+     "work_prompts": false,
+     "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+     "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+     "orca_repo": "",
+     "orca_agent": "claude",
+     "capture_system_audio": true,
+     "system_audio_device": "",
+     "default_template": "general",
+     "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+    },
+    "setup": {
+     "version": 0
+    }
+   }
+  }
+ ],
+ "restart_put": [
+  200,
+  {
+   "config_version": 2,
+   "stt": {
+    "provider": "auto",
+    "model": "base",
+    "language": null,
+    "device": "auto"
+   },
+   "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "fast_model": "",
+    "api_key_ref": "",
+    "cleanup_enabled": true,
+    "cleanup_timeout": 120,
+    "num_ctx": 8192
+   },
+   "cleanup": {
+    "level": "medium",
+    "styles_enabled": true,
+    "style_work": "formal",
+    "style_email": "formal",
+    "style_personal": "excited",
+    "style_other": "formal",
+    "app_overrides": []
+   },
+   "hotkey": {
+    "key": "alt_l",
+    "sounds": true,
+    "paste_last": "<ctrl>+<shift>+v",
+    "command": "alt_r",
+    "polish": "<ctrl>+<alt>+1",
+    "prompt": "<ctrl>+<alt>+2",
+    "dictation_toggle": ""
+   },
+   "paste": {
+    "method": "auto"
+   },
+   "dictation": {
+    "enabled": true,
+    "spoken_symbols": false,
+    "spoken_punctuation": true,
+    "silence_threshold_dbfs": -50.0,
+    "command_names": [],
+    "skills_dirs": [
+     "~/.claude/skills",
+     "~/.agents/skills"
+    ],
+    "sample_rate": 16000,
+    "input_device": "",
+    "max_recording_seconds": 1200,
+    "pause_media": false
+   },
+   "server": {
+    "host": "127.0.0.1",
+    "port": 8756
+   },
+   "features": {
+    "meetings": false,
+    "hot_phrases": true
+   },
+   "history": {
+    "enabled": true,
+    "keep_audio_clips": 3
+   },
+   "meetings": {
+    "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+    "notes_folder": "notes/meetings",
+    "logs_folder": "notes/transcripts",
+    "watch": false,
+    "chunk_seconds": 3600,
+    "min_busy_seconds": 12,
+    "auto_start": true,
+    "work_prompts": false,
+    "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+    "orca_repo": "",
+    "orca_agent": "claude",
+    "capture_system_audio": true,
+    "system_audio_device": "",
+    "default_template": "general",
+    "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+   },
+   "setup": {
+    "version": 0
+   },
+   "restart_required": [
+    "hotkey.sounds"
+   ]
+  }
+ ],
+ "final": [
+  200,
+  {
+   "config_version": 2,
+   "stt": {
+    "provider": "auto",
+    "model": "base",
+    "language": null,
+    "device": "auto"
+   },
+   "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "fast_model": "",
+    "api_key_ref": "",
+    "cleanup_enabled": true,
+    "cleanup_timeout": 120,
+    "num_ctx": 8192
+   },
+   "cleanup": {
+    "level": "medium",
+    "styles_enabled": true,
+    "style_work": "formal",
+    "style_email": "formal",
+    "style_personal": "excited",
+    "style_other": "formal",
+    "app_overrides": []
+   },
+   "hotkey": {
+    "key": "alt_l",
+    "sounds": true,
+    "paste_last": "<ctrl>+<shift>+v",
+    "command": "alt_r",
+    "polish": "<ctrl>+<alt>+1",
+    "prompt": "<ctrl>+<alt>+2",
+    "dictation_toggle": ""
+   },
+   "paste": {
+    "method": "auto"
+   },
+   "dictation": {
+    "enabled": true,
+    "spoken_symbols": false,
+    "spoken_punctuation": true,
+    "silence_threshold_dbfs": -50.0,
+    "command_names": [],
+    "skills_dirs": [
+     "~/.claude/skills",
+     "~/.agents/skills"
+    ],
+    "sample_rate": 16000,
+    "input_device": "",
+    "max_recording_seconds": 1200,
+    "pause_media": false
+   },
+   "server": {
+    "host": "127.0.0.1",
+    "port": 8756
+   },
+   "features": {
+    "meetings": false,
+    "hot_phrases": true
+   },
+   "history": {
+    "enabled": true,
+    "keep_audio_clips": 3
+   },
+   "meetings": {
+    "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+    "notes_folder": "notes/meetings",
+    "logs_folder": "notes/transcripts",
+    "watch": false,
+    "chunk_seconds": 3600,
+    "min_busy_seconds": 12,
+    "auto_start": true,
+    "work_prompts": false,
+    "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+    "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+    "orca_repo": "",
+    "orca_agent": "claude",
+    "capture_system_audio": true,
+    "system_audio_device": "",
+    "default_template": "general",
+    "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+   },
+   "setup": {
+    "version": 0
+   }
+  }
+ ],
+ "disk_final": {
+  "config_version": 2,
+  "stt": {
+   "provider": "auto",
+   "model": "base",
+   "device": "auto"
+  },
+  "llm": {
+   "provider": "openai-compatible",
+   "base_url": "https://api.fireworks.ai/inference/v1",
+   "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+   "fast_model": "",
+   "api_key_ref": "",
+   "cleanup_enabled": true,
+   "cleanup_timeout": 120,
+   "num_ctx": 8192
+  },
+  "cleanup": {
+   "level": "medium",
+   "styles_enabled": true,
+   "style_work": "formal",
+   "style_email": "formal",
+   "style_personal": "excited",
+   "style_other": "formal",
+   "app_overrides": []
+  },
+  "hotkey": {
+   "key": "alt_l",
+   "sounds": true,
+   "paste_last": "<ctrl>+<shift>+v",
+   "command": "alt_r",
+   "polish": "<ctrl>+<alt>+1",
+   "prompt": "<ctrl>+<alt>+2",
+   "dictation_toggle": ""
+  },
+  "paste": {
+   "method": "auto"
+  },
+  "dictation": {
+   "enabled": true,
+   "spoken_symbols": false,
+   "spoken_punctuation": true,
+   "silence_threshold_dbfs": -50.0,
+   "command_names": [],
+   "skills_dirs": [
+    "~/.claude/skills",
+    "~/.agents/skills"
+   ],
+   "sample_rate": 16000,
+   "input_device": "",
+   "max_recording_seconds": 1200,
+   "pause_media": false
+  },
+  "server": {
+   "host": "127.0.0.1",
+   "port": 8756
+  },
+  "features": {
+   "meetings": false,
+   "hot_phrases": true
+  },
+  "history": {
+   "enabled": true,
+   "keep_audio_clips": 3
+  },
+  "meetings": {
+   "vault_path": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/vault",
+   "notes_folder": "notes/meetings",
+   "logs_folder": "notes/transcripts",
+   "watch": false,
+   "chunk_seconds": 3600,
+   "min_busy_seconds": 12,
+   "auto_start": true,
+   "work_prompts": false,
+   "fireworks_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+   "prompts_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/prompts",
+   "orca_repo": "",
+   "orca_agent": "claude",
+   "capture_system_audio": true,
+   "system_audio_device": "",
+   "default_template": "general",
+   "templates_dir": "/tmp/lfsim-set-config-roundtrip-uo6avfpa/templates"
+  },
+  "setup": {
+   "version": 0
+  }
+ },
+ "secret_in_responses": false,
+ "secret_on_disk": false,
+ "http": [
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.01
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 200,
+   "secs": 0.01
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 400,
+   "secs": 0.0
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 400,
+   "secs": 0.0
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 400,
+   "secs": 0.0
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 400,
+   "secs": 0.0
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 400,
+   "secs": 0.0
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 200,
+   "secs": 0.01
+  },
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "secs": 0.0
+  }
+ ],
+ "finished": "2026-11-24T10:01:53"
+}

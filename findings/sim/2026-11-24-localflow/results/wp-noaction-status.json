@@ -1,0 +1,45 @@
+{
+ "cell": "wp-noaction-status",
+ "suite": "meetings",
+ "kind": "workprompt",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:17",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "available": true,
+ "notes": "## Summary\nRoutine weekly status round. Everyone shared what they finished; nothing new was decided and no follow-ups were assigned.\n\n## Key Points\n- Ana said the queue migration finished last week and has been stable since.\n- Ben mentioned the billing dashboard has been live for a month with no incidents.\n- The team chatted about the office move and the holiday schedule.\n\n## Decisions\n- None.\n\n## Action Items\n- None.\n",
+ "workprompt_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "prompts_md": "(No new work identified.)",
+ "llm_calls": [
+  {
+   "system": "You derive work prompts from meeting notes inside an automated dictation pipeline. Your output is inserted verbatim into a Markdown document and parsed by a machine, so the format contract below is strict: emit only the specified blocks, with no preamble, commentary, or code fences.\n\n<task>\nRead the meeting notes (Markdown with Summary / Key Points / Decisions / Action Items sections). Identify each distinct piece of NEW work the notes imply \u2014 chiefly from Decisions and Action Items. For each one, write a work prompt: a self-contained instruction a person could paste into an AI coding agent or hand to a teammate to start immediately, without seeing the notes. Fold the relevant context (names, systems, constraints, deadlines) from the notes into the prompt itself so it stands alone.\n</task>\n\n<output_format>\nFor each piece of work, emit exactly one block:\n\n### <short work title, 3-8 words>\n> <work prompt: 2-6 sentences covering scope, inputs/context, and what done looks like. If the prompt spans multiple lines, begin every line with \"> \".>\n\nSeparate blocks with one blank line. If the notes imply no new work at all, output exactly this line and nothing else:\n(No new work identified.)\n</output_format>\n\n<rules>\n- Ground every work item in the notes: derive only work the decisions or action items actually support. When in doubt whether something is real work, omit it \u2014 an invented task is worse than a missed one.\n- Merge overlapping items into one block so each block is a distinct piece of work.\n- Skip vague chatter, status updates, and discussion with no implied action.\n- Write prompts as direct instructions (\"Migrate the...\", \"Draft a...\"), concrete about scope and completion criteria.\n</rules>\n\n<example>\nNotes say: \"Decision: move session storage from local files to Redis before the pilot. Action: Priya to update the deploy docs afterward.\"\n\n### Migrate session storage to Redis\n> Replace the local-file session storage in the app with Redis, keeping the current session API unchanged. This must land before the pilot launch. Done means all session reads/writes go through Redis and existing session tests pass.\n\n### Update deploy docs for Redis sessions\n> After the Redis session migration lands, update the deployment documentation to cover Redis as a new runtime dependency: provisioning, connection configuration, and any changed environment variables. Owner per the meeting: Priya.\n</example>\n\n<example>\nNotes contain only status updates and scheduling discussion, no decisions or action items implying work:\n(No new work identified.)\n</example>\n\nBefore finishing, verify: every block is traceable to a specific decision or action item in the notes, no two blocks describe the same work, and the output contains nothing outside the specified blocks (or the exact fallback line).",
+   "prompt": "<meeting_notes>\n## Summary\nRoutine weekly status round. Everyone shared what they finished; nothing new was decided and no follow-ups were assigned.\n\n## Key Points\n- Ana said the queue migration finished last week and has been stable since.\n- Ben mentioned the billing dashboard has been live for a month with no incidents.\n- The team chatted about the office move and the holiday schedule.\n\n## Decisions\n- None.\n\n## Action Items\n- None.\n\n</meeting_notes>\n\nDerive the work prompts from these meeting notes, following your instructions exactly.",
+   "output": "(No new work identified.)",
+   "secs": 1.18
+  }
+ ],
+ "parsed": [],
+ "written": {},
+ "queue_path_isolated": true,
+ "steps": {
+  "list_initial": [
+   200,
+   {
+    "entries": []
+   }
+  ]
+ },
+ "http": [
+  {
+   "call": "GET /prompts",
+   "status": 200,
+   "secs": 0.01
+  }
+ ],
+ "finished": "2026-11-24T10:01:18"
+}

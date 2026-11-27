@@ -68,6 +68,8 @@ pub struct Launch {
     pub notice: Option<String>,
     /// The window lock for this data root, held for the whole process.
     pub instance: Instance,
+    /// `--sandbox-fixture`: the screenshot scene's one action after launch.
+    pub fixture: Option<crate::sandbox::Fixture>,
 }
 
 pub struct Toast {
@@ -229,6 +231,7 @@ pub enum View {
     Prompts(Entity<pages::prompts::PromptsPage>),
     Models(Entity<pages::models::ModelsPage>),
     Settings(Entity<pages::settings::SettingsPage>),
+    People(Entity<pages::people::PeoplePage>),
 }
 
 pub struct Shell {
@@ -411,7 +414,72 @@ impl Shell {
         shell.check_health(cx);
         shell.probe_runtime(cx);
         shell.start_timers(cx);
+        if let Some(fixture) = launch.fixture {
+            crate::sandbox::set_scene(fixture);
+            // After the first frames and the page's first reads.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let _ = this.update(cx, |shell, cx| shell.run_fixture(fixture, cx));
+            })
+            .detach();
+        }
         shell
+    }
+
+    /// The fixture scene's one real action, through the page's own methods.
+    fn run_fixture(&mut self, fixture: crate::sandbox::Fixture, cx: &mut Context<Self>) {
+        use crate::sandbox::Fixture;
+        self.navigate(fixture.page(), None, cx);
+        match (fixture, self.find(self.page)) {
+            (Fixture::SpeakersSaved, Some(View::Meetings(v))) => {
+                v.update(cx, |p, cx| p.start_and_stop(cx))
+            }
+            (Fixture::SpeakersRecent, Some(View::Meetings(v))) => {
+                v.update(cx, |p, cx| p.open_first_recent_speakers(cx))
+            }
+            (Fixture::SpeakersSettings, Some(View::Settings(v))) => {
+                v.update(cx, |p, cx| p.open_tab("meetings", cx))
+            }
+            (Fixture::SpeakersPeople, Some(View::People(v))) => v.update(cx, |p, cx| p.refresh(cx)),
+            _ => {}
+        }
+    }
+
+    /// People is shown (sidebar, routing, page) only while turned on.
+    pub fn people_enabled(&self) -> bool {
+        crate::controllers::people::enabled(&self.cx.services.config())
+    }
+
+    /// `--page people` arrives as an unknown page (it has no Hub route):
+    /// People while it is turned on, else Home with the notice as usual.
+    fn resolve_people(&self, request: Request) -> Request {
+        let people = request.is_unknown_home()
+            && request
+                .unknown_page
+                .as_deref()
+                .is_some_and(Page::is_people_name);
+        if people && self.people_enabled() {
+            Route::Page(Page::People).into()
+        } else {
+            request
+        }
+    }
+
+    /// The gate closed: drop the People view (its list goes with it) and
+    /// leave the page if it is on screen.
+    fn enforce_people_gate(&mut self, cx: &mut Context<Self>) {
+        if self.people_enabled() {
+            return;
+        }
+        if self.page == Page::People {
+            self.page = Page::Home;
+            *self.cx.current_page.borrow_mut() = Page::Home;
+            self.ensure_view(Page::Home, cx);
+            cx.notify();
+        }
+        self.views.retain(|(page, _)| *page != Page::People);
     }
 
     // ------------------------------------------------------------ setup ---
@@ -463,6 +531,7 @@ impl Shell {
         let Some(request) = self.instance.take_request() else {
             return;
         };
+        let request = self.resolve_people(request);
         window.activate_window();
         match request.route {
             Route::Setup if self.confirm.is_none() => self.show_setup(cx),
@@ -814,6 +883,7 @@ impl Shell {
 
     /// Re-read config-derived state on every created page.
     pub fn refresh_views(&mut self, cx: &mut Context<Self>) {
+        self.enforce_people_gate(cx);
         for (_, view) in &self.views {
             match view {
                 View::Home(v) => v.update(cx, |p, cx| p.refresh(cx)),
@@ -826,6 +896,7 @@ impl Shell {
                 View::Prompts(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::Models(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::Settings(v) => v.update(cx, |p, cx| p.refresh(cx)),
+                View::People(v) => v.update(cx, |p, cx| p.refresh(cx)),
             }
         }
     }
@@ -871,6 +942,14 @@ impl Shell {
             }
             return;
         }
+        // People is only reachable while turned on (and the gate may have
+        // closed since its sidebar entry was drawn).
+        let page = if page == Page::People && !self.people_enabled() {
+            Page::Home
+        } else {
+            page
+        };
+        self.enforce_people_gate(cx);
         let leaving = self.page;
         if leaving == Page::Snippets && page != Page::Snippets {
             if let Some(View::Snippets(v)) = self.find(Page::Snippets) {
@@ -908,6 +987,7 @@ impl Shell {
                 View::Prompts(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::Models(v) => v.update(cx, |p, cx| p.refresh(cx)),
                 View::Settings(v) => v.update(cx, |p, cx| p.refresh(cx)),
+                View::People(v) => v.update(cx, |p, cx| p.refresh(cx)),
             }
         }
         cx.notify();
@@ -938,6 +1018,33 @@ impl Shell {
         self.views.iter().find(|(p, _)| *p == page).map(|(_, v)| v)
     }
 
+    /// The window lost or regained activation. Losing it releases a setup
+    /// microphone test; regaining it while Settings is the current page lets
+    /// the page re-check speaker readiness (it asks only on the Meetings tab
+    /// when not ready yet).
+    pub(crate) fn window_activation_changed(&mut self, active: bool, cx: &mut Context<Self>) {
+        if !active {
+            if let Some(view) = self.setup_view.clone() {
+                view.update(cx, |v, cx| v.release_audio(cx));
+            }
+            return;
+        }
+        if *self.cx.current_page.borrow() != Page::Settings {
+            return;
+        }
+        let settings = match self.find(Page::Settings) {
+            Some(View::Settings(view)) => view.clone(),
+            _ => return,
+        };
+        settings.update(cx, |v, cx| v.window_activated(cx));
+    }
+
+    /// A created page's view (page tests drive the real page through it).
+    #[cfg(test)]
+    pub(crate) fn view(&self, page: Page) -> Option<&View> {
+        self.find(page)
+    }
+
     fn ensure_view(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.find(page).is_some() {
             return;
@@ -963,6 +1070,7 @@ impl Shell {
             Page::Settings => {
                 View::Settings(cx.new(|cx| pages::settings::SettingsPage::new(pcx, cx)))
             }
+            Page::People => View::People(cx.new(|cx| pages::people::PeoplePage::new(pcx, cx))),
         };
         self.views.push((page, view));
     }
@@ -1019,6 +1127,7 @@ impl Shell {
             Some(View::Prompts(v)) => v.clone().into_any_element(),
             Some(View::Models(v)) => v.clone().into_any_element(),
             Some(View::Settings(v)) => v.clone().into_any_element(),
+            Some(View::People(v)) => v.clone().into_any_element(),
             None => div().into_any_element(),
         }
     }
@@ -1089,7 +1198,7 @@ impl Shell {
             cx.propagate();
             return;
         }
-        let order = Page::sidebar_order();
+        let order = Page::visible_order(self.people_enabled());
         let i = order.iter().position(|p| *p == self.page).unwrap_or(0) as i32;
         let n = order.len() as i32;
         let next = order[((i + delta).rem_euclid(n)) as usize];
@@ -1099,6 +1208,7 @@ impl Shell {
     // ---------------------------------------------------------------- views ---
 
     fn render_sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let people = self.people_enabled();
         let nav_item = |page: Page, cx: &mut Context<Self>| {
             let selected = self.page == page;
             let (sz, lh) = text::body();
@@ -1156,6 +1266,10 @@ impl Shell {
             }
             for page in pages {
                 groups = groups.child(nav_item(*page, cx));
+                // People follows Meetings, only while it is turned on.
+                if *page == Page::Meetings && people {
+                    groups = groups.child(nav_item(Page::People, cx));
+                }
             }
         }
         let mut footer = div()
@@ -1968,12 +2082,9 @@ pub fn run(launch: Launch) -> RunStatus {
                         // (also one still opening) and cancels a trial;
                         // nothing captures in the background. After a system
                         // permission prompt the user presses Test again.
+                        // Regaining it re-checks speaker readiness on Settings.
                         cx.observe_window_activation(window, |shell, window, cx| {
-                            if !window.is_window_active() {
-                                if let Some(view) = shell.setup_view.clone() {
-                                    view.update(cx, |v, cx| v.release_audio(cx));
-                                }
-                            }
+                            shell.window_activation_changed(window.is_window_active(), cx);
                         })
                         .detach();
                         // Follow the system light/dark setting live, in
@@ -2060,7 +2171,7 @@ mod tests {
 /// and runtime are simulated, and no engine, tray, hotkey, model or network
 /// is touched. Shortcuts go through the real keymap and dispatch tree.
 #[cfg(test)]
-mod focus_tests {
+pub(crate) mod focus_tests {
     use std::rc::Rc;
 
     use gpui::{Entity, FocusHandle, TestAppContext, VisualTestContext};
@@ -2077,7 +2188,7 @@ mod focus_tests {
     }
 
     /// [`open`], after `prepare` adjusts the seeded sandbox data.
-    pub(super) fn open_with(
+    pub(crate) fn open_with(
         page: Page,
         prepare: impl FnOnce(&crate::data::DataRoot),
         cx: &mut TestAppContext,
@@ -2105,6 +2216,7 @@ mod focus_tests {
             setup: false,
             notice: None,
             instance,
+            fixture: None,
         };
         let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(launch, cx));
         cx.update(|window, cx| {
@@ -2427,6 +2539,64 @@ mod focus_tests {
         hand_off(&shell, &dir, Route::Page(Page::History).into(), cx);
         assert_eq!(page(&shell, cx), Page::History);
         assert_eq!(toast(&shell, cx), None);
+    }
+
+    fn people_request() -> crate::controllers::instance::Request {
+        crate::controllers::instance::Request {
+            route: Route::Page(Page::Home),
+            unknown_page: Some("people".into()),
+        }
+    }
+
+    fn set_people_flags(root: &crate::data::DataRoot, on: bool) {
+        let mut config = lf_core::config::load_from(&root.config_path).unwrap();
+        config.set_field("speaker_diarization", serde_json::json!(on));
+        config.set_field("speaker_recognition", serde_json::json!(on));
+        lf_core::config::save_config(&config, Some(&root.config_path)).unwrap();
+    }
+
+    fn has_people_view(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, _| shell.find(Page::People).is_some())
+    }
+
+    /// Flags off (the default sandbox): no People anywhere; `people` is an
+    /// unknown page like any other, and direct navigation lands on Home.
+    #[gpui::test]
+    fn people_is_hidden_and_unroutable_while_off(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open(Page::History, cx);
+        assert!(!shell.read_with(cx, |shell, _| shell.people_enabled()));
+        hand_off(&shell, &dir, people_request(), cx);
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert_eq!(
+            toast(&shell, cx).as_deref(),
+            Some("There's no page called “people”, so Home is shown.")
+        );
+        shell.update(cx, |shell, cx| shell.navigate(Page::People, None, cx));
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(!has_people_view(&shell, cx));
+        assert_eq!(Page::visible_order(false), Page::sidebar_order());
+    }
+
+    /// Both flags on: People is routable (no notice); turning the gate off
+    /// while it is open goes Home and drops the page.
+    #[gpui::test]
+    fn people_follows_its_gate(cx: &mut TestAppContext) {
+        let (shell, cx, dir) = open_with(Page::Home, |root| set_people_flags(root, true), cx);
+        assert!(shell.read_with(cx, |shell, _| shell.people_enabled()));
+        hand_off(&shell, &dir, people_request(), cx);
+        assert_eq!(page(&shell, cx), Page::People);
+        assert_eq!(toast(&shell, cx), None);
+        assert!(has_people_view(&shell, cx));
+
+        let root = shell.read_with(cx, |shell, _| shell.cx.services.root.clone());
+        set_people_flags(&root, false);
+        shell.update(cx, |shell, cx| {
+            shell.cx.services.reload_config();
+            shell.refresh_views(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(page(&shell, cx), Page::Home);
+        assert!(!has_people_view(&shell, cx), "the list goes with the gate");
     }
 
     const NOTICE: &str = "There's no page called “NoSuchPage”, so Home is shown.";

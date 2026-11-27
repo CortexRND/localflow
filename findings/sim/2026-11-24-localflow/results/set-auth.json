@@ -1,0 +1,116 @@
+{
+ "cell": "set-auth",
+ "suite": "settings_api",
+ "kind": "auth",
+ "commit": "3ee9ce30eaeac2b9f27793adb1eecf3ae92a4a5d",
+ "sut_dirty": false,
+ "started": "2026-11-24T10:01:52",
+ "llm_provider": "openai-compatible",
+ "llm_base_url": "https://api.fireworks.ai/inference/v1",
+ "llm_model": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+ "spec_version": 1,
+ "localflow_file_in_sut": true,
+ "llm_key_present": true,
+ "unauthenticated": [
+  {
+   "call": "GET /api/config",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "GET /api/status",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "PUT /api/config",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "POST /api/recall",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "POST /meeting/start",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "GET /meeting/status",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "POST /transcribe",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "GET /prompts",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "GET /api/secrets",
+   "status": 401,
+   "leaks_config": false
+  }
+ ],
+ "wrong_token": [
+  {
+   "call": "GET /api/config",
+   "status": 401,
+   "leaks_config": false
+  },
+  {
+   "call": "POST /api/recall",
+   "status": 401,
+   "leaks_config": false
+  }
+ ],
+ "foreign_host": [
+  {
+   "call": "GET /api/config",
+   "status": 403,
+   "leaks_config": false
+  }
+ ],
+ "foreign_host_with_token": [
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "leaks_config": true
+  }
+ ],
+ "public": [
+  {
+   "call": "GET /healthz",
+   "status": 200,
+   "leaks_config": false
+  }
+ ],
+ "authenticated": [
+  {
+   "call": "GET /api/config",
+   "status": 200,
+   "leaks_config": true
+  },
+  {
+   "call": "GET /api/status",
+   "status": 200,
+   "leaks_config": false
+  },
+  {
+   "call": "POST /api/recall",
+   "status": 200,
+   "leaks_config": true
+  }
+ ],
+ "after_unauthenticated": {
+  "cleanup_level": "light",
+  "session": null
+ },
+ "finished": "2026-11-24T10:01:53"
+}
