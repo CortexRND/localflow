@@ -130,6 +130,18 @@ fn exact(value: Option<&Value>, max: usize) -> Option<String> {
         .then(|| s.to_string())
 }
 
+/// A workspace path, byte-exact: the service's own rule (only NUL, LF and
+/// CR are refused; a tab or other control character is a valid path), so a
+/// path it accepted is never dropped here and then erased by the next
+/// `repos` patch.
+fn path_field(value: Option<&Value>) -> Option<String> {
+    let s = value?.as_str()?;
+    (!s.is_empty()
+        && s.chars().count() <= PATH_CHARS
+        && !s.chars().any(|c| matches!(c, '\0' | '\n' | '\r')))
+    .then(|| s.to_string())
+}
+
 /// `GET /api/agents/status` for the settings tab.
 pub fn parse_settings(reply: &Value) -> AgentSettings {
     let flag = |name: &str| reply.get(name).and_then(Value::as_bool).unwrap_or(false);
@@ -151,7 +163,7 @@ pub fn parse_settings(reply: &Value) -> AgentSettings {
             .filter_map(|r| {
                 Some(RepoEntry {
                     alias: exact(r.get("alias"), ALIAS_CHARS)?,
-                    path: exact(r.get("path"), PATH_CHARS)?,
+                    path: path_field(r.get("path"))?,
                     exists: r.get("exists").and_then(Value::as_bool).unwrap_or(false),
                 })
             })
@@ -591,6 +603,43 @@ mod tests {
         assert!(odd.repos.is_empty());
         assert_eq!(odd.default_repo, "");
         assert_eq!(odd.api_version, 0);
+    }
+
+    /// A path the service accepts (a tab, another control character) is
+    /// kept and re-sent unchanged by the next `repos` patch; aliases stay
+    /// strict.
+    #[test]
+    fn a_control_character_path_round_trips() {
+        let s = parse_settings(&json!({"api_version": 1, "default_repo": "", "repos": [
+            {"alias": "tabbed", "path": "/srv/a\tb", "exists": true},
+            {"alias": "bell", "path": "/srv/x\u{7}y", "exists": true},
+            {"alias": "web", "path": "/srv/web", "exists": true},
+            {"alias": "bad\talias", "path": "/srv/z", "exists": true},
+            {"alias": "nul", "path": "/srv/a\u{0}b", "exists": true},
+            {"alias": "cr", "path": "/srv/a\rb", "exists": true},
+        ]}));
+        let shown: Vec<(&str, &str)> = s
+            .repos
+            .iter()
+            .map(|r| (r.alias.as_str(), r.path.as_str()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("tabbed", "/srv/a\tb"),
+                ("bell", "/srv/x\u{7}y"),
+                ("web", "/srv/web")
+            ]
+        );
+        assert_eq!(
+            repos_remove_patch(&s, "web"),
+            json!({"agents": {"repos": ["tabbed=/srv/a\tb", "bell=/srv/x\u{7}y"]}})
+        );
+        assert_eq!(
+            repos_add_patch(&s, "docs", "/srv/docs")["agents"]["repos"][0],
+            "tabbed=/srv/a\tb"
+        );
+        assert!(absolute_folder("/srv/a\tb"), "the add check agrees");
     }
 
     #[test]
