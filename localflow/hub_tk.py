@@ -9,7 +9,7 @@ import tkinter as tk
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 from localflow.config import (
@@ -35,6 +35,27 @@ from localflow.hub_model import (
 from localflow.hub_settings import DIARIZATION_KEYS, diarization_disabled_reason
 from localflow.live_config import LazyConfig
 from localflow.meeting_client import MeetingClient, VoiceRecording, vault_notes_path
+from localflow.models_layout import (
+    speaker_apply_download,
+    speaker_apply_progress,
+    speaker_apply_removed,
+    speaker_apply_status,
+    speaker_begin,
+    speaker_busy,
+    speaker_buttons,
+    speaker_cancel,
+    speaker_detail,
+    speaker_initial_state,
+    speaker_lines,
+    speaker_pill,
+    speaker_progress,
+    speaker_protected,
+    speaker_reset,
+    speaker_run_check,
+    speaker_run_download,
+    speaker_run_remove,
+    speaker_total_bytes,
+)
 from localflow.people_model import (
     CONSENT_CANCEL,
     CONSENT_CONFIRM,
@@ -62,8 +83,10 @@ from localflow.ui_tokens import (
     CARD_GAP,
     CARD_PADDING,
     PAGE_MARGIN,
+    PILL_TINT,
     SUN_TEXT,
     resolve_tk_font,
+    surface_tint,
     tokens_for,
 )
 from localflow.ui_tokens import (
@@ -110,6 +133,9 @@ class HubWindow:
         meeting_client=None,
         initial_page="Home",
         perf_summary=None,
+        *,
+        storage_cache=None,
+        speaker_backend=None,
     ):
         self.root = root
         self.tokens = tokens_for(theme)
@@ -154,6 +180,17 @@ class HubWindow:
         self._meeting_results = queue.Queue()
         self._meeting_dispatch_after = None
         self._meeting_requests_in_flight = 0
+        # Models -> Speaker labels: a plain state dict (models_layout
+        # speaker_*), results from worker threads on a queue drained by
+        # root.after. `storage_cache` and `speaker_backend` are test seams
+        # (None = the Hugging Face cache and the real calls).
+        self._speaker = speaker_initial_state()
+        self._speaker_results = queue.Queue()
+        self._speaker_after = None
+        self._speaker_widgets = {}
+        self.storage_cache = storage_cache
+        self.speaker_backend = speaker_backend
+        self._closed = False
         # The post-stop Speakers editor: the panel is the state, the view only
         # draws it and exists only while there are speakers to show.
         self._meeting_speakers = SpeakerPanel()
@@ -166,6 +203,7 @@ class HubWindow:
         self._people_after = None  # the 1 s retry of a 403 right after consent
         self.page = "Home"
         self.page_errors: dict[str, str] = {}
+        root.protocol("WM_DELETE_WINDOW", self.close)
         root.title("LocalFlow Hub")
         root.geometry("1040x700")
         root.minsize(820, 560)
@@ -316,6 +354,11 @@ class HubWindow:
             if self._meeting_after is not None:
                 self.root.after_cancel(self._meeting_after)
                 self._meeting_after = None
+        # Its widgets go with the page; the speaker state stays. Entering
+        # Models checks the models again (a CLI download or delete since).
+        self._speaker_widgets = {}
+        if page == "Models" and self.page != "Models":
+            self._speaker = speaker_reset(self._speaker)
         self.page = page
         self._clear()
         self._header(page)
@@ -325,6 +368,33 @@ class HubWindow:
             self.page_errors[page] = str(exc)
             self._clear()
             self._header(page)
+
+    def close(self):
+        """Window closed: cancel a speaker model download (it removes its own
+        partial file), stop every timer, then destroy the window. Results
+        arriving later are ignored."""
+        if self._closed:
+            return
+        self._closed = True
+        cancel = self._speaker["cancel"]
+        if cancel is not None:
+            cancel.set()
+        for name in (
+            "_speaker_after", "_dictation_after", "_meeting_after",
+            "_meeting_notes_after", "_meeting_dispatch_after",
+        ):
+            after = getattr(self, name, None)
+            setattr(self, name, None)
+            if after is not None:
+                try:
+                    self.root.after_cancel(after)
+                except tk.TclError:
+                    pass
+        self._speaker_widgets = {}
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def set_page_error(self, page: str, message: str):
         self.page_errors[page] = message
@@ -999,6 +1069,216 @@ class HubWindow:
             self.body, "Change models…",
             lambda: subprocess.Popen([sys.executable, "-m", "localflow.setup_window"]),
         ).pack(anchor="w", pady=12)
+        self._speaker_section()
+
+    # ------------------------------------------------------ Speaker labels ---
+    # Offline status, Download (progress, Cancel), Verify and Remove of the
+    # two speaker-label models. Workers never touch Tk: they put
+    # (token, kind, payload) on _speaker_results, drained by root.after on
+    # the UI thread, where a stale token or a closed window drops them.
+    # Widgets are reconfigured in place (no tk.Variable objects).
+
+    def _speaker_section(self):
+        surface, muted = self.tokens["surface"], self.tokens["muted"]
+        frame = tk.Frame(
+            self.body, bg=surface, padx=CARD_PADDING, pady=14,
+            highlightbackground=self.tokens["line"], highlightthickness=1,
+        )
+        frame.pack(fill="x", pady=(0, CARD_GAP))
+        head = tk.Frame(frame, bg=surface)
+        head.pack(fill="x")
+        tk.Label(
+            head, text="Speaker labels", bg=surface, fg=self.tokens["ink"],
+            font=(self.font_family, 15, "bold"),
+        ).pack(side="left")
+        pill = tk.Label(head, bg=surface, padx=8, pady=2, font=(self.font_family, 11, "bold"))
+        pill.pack(side="left", padx=(10, 0))
+        buttons = tk.Frame(head, bg=surface)
+        buttons.pack(side="right")
+        tk.Label(
+            frame, text=speaker_detail(), bg=surface, fg=muted, anchor="w",
+            font=(self.font_family, 12),
+        ).pack(fill="x", pady=(4, 0))
+        progress = tk.Frame(frame, bg=surface)
+        bar = ttk.Progressbar(progress, mode="determinate", maximum=1.0)
+        bar.pack(fill="x")
+        progress_text = tk.Label(
+            progress, bg=surface, fg=muted, anchor="w", font=(self.font_family, 11),
+        )
+        progress_text.pack(fill="x", pady=(4, 0))
+        notes = tk.Frame(frame, bg=surface)
+        self._speaker_widgets = {
+            "frame": frame, "pill": pill, "buttons": buttons, "button": {},
+            "progress": progress, "bar": bar, "progress_text": progress_text,
+            "notes": notes, "drawn": None,
+        }
+        if self._speaker["phase"] == "unknown":
+            self._speaker_check()  # renders "Checking…"
+        else:
+            self._speaker_render()
+
+    def _speaker_render(self):
+        widgets = self._speaker_widgets
+        if self._closed or self.page != "Models" or not widgets:
+            return
+        try:
+            if not widgets["frame"].winfo_exists():
+                return
+            state = self._speaker
+            buttons = speaker_buttons(state, self.config)
+            lines = speaker_lines(state, self.config)
+            progress = state["phase"] in ("downloading", "cancelling")
+            drawn = (state["phase"], tuple(buttons), tuple(lines))
+            if widgets["drawn"] != drawn:
+                self._speaker_draw(buttons, lines, progress)
+                widgets["drawn"] = drawn
+            if progress:
+                fraction, text = speaker_progress(state)
+                widgets["bar"].configure(value=fraction)
+                widgets["progress_text"].configure(text=text)
+        except tk.TclError:
+            pass
+
+    def _speaker_draw(self, buttons, lines, progress):
+        widgets, tokens = self._speaker_widgets, self.tokens
+        label, (tint, text) = speaker_pill(self._speaker)
+        widgets["pill"].configure(
+            text=label, bg=surface_tint(tint, tokens, PILL_TINT), fg=tokens[text],
+        )
+        for child in widgets["buttons"].winfo_children():
+            child.destroy()
+        commands = {
+            "download": self._speaker_download, "cancel": self._speaker_cancel,
+            "verify": self._speaker_verify, "remove": self._speaker_remove,
+        }
+        widgets["button"] = {}
+        for button_id, title, kind, enabled in buttons:
+            style = {"kind": kind}
+            if kind == "destructive_ghost":
+                style = {"kind": "ghost", "fg": tokens["red"]}
+            button = self._button(widgets["buttons"], title, commands[button_id], **style)
+            button.configure(state="normal" if enabled else "disabled")
+            button.pack(side="left", padx=(8, 0))
+            widgets["button"][button_id] = button
+        widgets["progress"].pack_forget()
+        widgets["notes"].pack_forget()
+        if progress:
+            widgets["progress"].pack(fill="x", pady=(10, 0))
+        for child in widgets["notes"].winfo_children():
+            child.destroy()
+        for note, tone in lines:
+            tk.Label(
+                widgets["notes"], text=note, bg=tokens["surface"], fg=tokens[tone],
+                anchor="w", justify="left", wraplength=640, font=(self.font_family, 12),
+            ).pack(fill="x")
+        if lines:
+            widgets["notes"].pack(fill="x", pady=(8, 0))
+
+    def _speaker_run(self, phase, work, finish, *, cancel=None, keep_message=False):
+        """`work(post)` on a worker thread, then `finish(result)` on the UI
+        thread; `post(done, total)` reports download progress."""
+        self._speaker = speaker_begin(
+            self._speaker, phase, cancel=cancel, keep_message=keep_message,
+        )
+        token = self._speaker["token"]
+        self._speaker_render()
+        results = self._speaker_results
+
+        def post(done, total):
+            results.put((token, "progress", (done, total)))
+
+        def run():
+            results.put((token, "result", (finish, work(post))))
+
+        threading.Thread(target=run, name="localflow-speaker-models", daemon=True).start()
+        if self._speaker_after is None:
+            self._speaker_after = self.root.after(50, self._speaker_dispatch)
+
+    def _speaker_dispatch(self):
+        self._speaker_after = None
+        if self._closed:
+            return
+        while True:
+            try:
+                token, kind, payload = self._speaker_results.get_nowait()
+            except queue.Empty:
+                break
+            if token != self._speaker["token"]:
+                continue  # an older operation's late result
+            if kind == "progress":
+                self._speaker = speaker_apply_progress(self._speaker, *payload)
+            else:
+                finish, result = payload
+                finish(result)
+        self._speaker_render()  # once per drain: progress ticks coalesce
+        if speaker_busy(self._speaker) and self._speaker_after is None:
+            try:
+                self._speaker_after = self.root.after(50, self._speaker_dispatch)
+            except tk.TclError:
+                pass
+
+    def _speaker_check(self, verify=False, keep_message=False):
+        backend, cache = self.speaker_backend, self.storage_cache
+
+        def finish(status):
+            self._speaker = speaker_apply_status(self._speaker, status, verify=verify)
+
+        self._speaker_run(
+            "checking", lambda _post: speaker_run_check(backend, cache), finish,
+            keep_message=keep_message,
+        )
+
+    def _speaker_download(self):
+        if self._speaker["phase"] != "missing":
+            return
+        backend, cache = self.speaker_backend, self.storage_cache
+        cancel = threading.Event()
+
+        def finish(result):
+            self._speaker = speaker_apply_download(self._speaker, *result)
+
+        self._speaker_run(
+            "downloading", lambda post: speaker_run_download(backend, cache, cancel, post),
+            finish, cancel=cancel,
+        )
+
+    def _speaker_cancel(self):
+        if self._speaker["phase"] != "downloading":
+            return
+        self._speaker["cancel"].set()
+        self._speaker = speaker_cancel(self._speaker)
+        self._speaker_render()
+
+    def _speaker_verify(self):
+        if self._speaker["phase"] == "ready":
+            self._speaker_check(verify=True)
+
+    def _speaker_remove(self):
+        from localflow.model_storage import format_bytes
+
+        if self._speaker["phase"] != "ready":
+            return
+        # Re-read now: models used for speaker labels are never removed.
+        config = load_config()
+        if speaker_protected(config):
+            self.config = config
+            self._speaker_render()  # Remove disabled, with the reason under it
+            return
+        if not messagebox.askyesno(
+            "Remove speaker models",
+            f"Remove the speaker models? This frees about "
+            f"{format_bytes(speaker_total_bytes())}. LocalFlow can download them again later.",
+        ):
+            return
+        backend, cache = self.speaker_backend, self.storage_cache
+
+        def finish(result):
+            self._speaker = speaker_apply_removed(self._speaker, *result)
+            self._speaker_check(keep_message=True)
+
+        self._speaker_run(
+            "removing", lambda _post: speaker_run_remove(backend, cache, load_config), finish,
+        )
 
     def _meeting_capture_fields(self):
         if hasattr(self, "meeting_notes"):

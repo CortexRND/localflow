@@ -411,6 +411,10 @@ lf config set meetings.speaker_diarization true
 lf speakers status                               # models, runtime and flags (offline)
 ```
 
+The Hub's **Models & keys** page has a **Speaker labels** card for the same models:
+its status (checked offline), **Download** with progress and **Cancel**, **Verify**, and
+**Remove…**. Remove is unavailable while `speaker_diarization` is on.
+
 - **What gets labelled.** Enable `capture_system_audio = true` to label remote voices
   on the system-audio stream. Enable `diarize_mic = true` to also label voices on the
   microphone (several people in one room).
