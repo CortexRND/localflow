@@ -95,6 +95,10 @@ pub(crate) fn prose_quoted_value(text: &str, c: &regex::Captures) -> bool {
     if open != b'\'' && open != b'"' {
         return false;
     }
+    let value_quote = if c.name("dq").is_some() { b'"' } else { b'\'' };
+    if value_quote != open {
+        return false;
+    }
     let prefix = c.get(1).expect("assignment name").as_str();
     let mut rest = prefix.chars().rev().skip_while(|ch| ch.is_whitespace());
     if !matches!(rest.next(), Some(':' | '=')) {

@@ -287,6 +287,10 @@ mod tests {
         assert_eq!(scan(jsonish).len(), 1, "a properly quoted key still scans");
     }
 
+        let quoted = "Use 'password=\"correct horse battery staple\"' exactly";
+        assert_eq!(scan(quoted).len(), 1, "a quoted assignment still scans");
+    }
+
     #[test]
     fn findings_give_kind_and_line_but_never_the_value() {
         let task = format!("Rotate the webhook key.\nUse api_key={KEY}\nthen redeploy.");
