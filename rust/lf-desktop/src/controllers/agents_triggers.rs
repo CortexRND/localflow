@@ -216,9 +216,17 @@ pub fn create_body(draft: &RuleDraft) -> Value {
 /// `PUT /api/agents/hot-commands/{id}`: only the fields that changed (an
 /// empty object when nothing did).
 pub fn rule_patch(old: &Rule, draft: &RuleDraft) -> Value {
+    edit_patch(&RuleDraft::from_rule(old), draft)
+}
+
+/// The fields the user changed in the editor since it was opened
+/// (`baseline`), and only those: a field edited elsewhere meanwhile (the
+/// CLI) and left alone here is never sent back with its old value.
+pub fn edit_patch(baseline: &RuleDraft, draft: &RuleDraft) -> Value {
+    let old = baseline;
     let mut out = Map::new();
     let trigger = draft.trigger.trim();
-    if trigger != old.trigger {
+    if trigger != old.trigger.trim() {
         out.insert("trigger".into(), json!(trigger));
     }
     if draft.provider != old.provider {
@@ -719,6 +727,24 @@ mod tests {
         let fixed = rule(json!({"prompt_template": "Run the nightly checks",
             "min_prompt_words": 3}));
         assert_eq!(rule_patch(&fixed, &RuleDraft::from_rule(&fixed)), json!({}));
+        // Dirty fields only: opened, then edited elsewhere (the CLI changed
+        // the task); the user changes only the agent and workspace here.
+        let opened = RuleDraft::from_rule(&old);
+        let mut mine = opened.clone();
+        mine.provider = "devin".into();
+        mine.repo = "localflow".into();
+        let mut cli = old.clone();
+        cli.prompt_template = "Changed elsewhere: {prompt}".into();
+        assert_eq!(
+            edit_patch(&opened, &mine),
+            json!({"provider": "devin", "repo": "localflow"}),
+            "the task edited elsewhere isn't sent back"
+        );
+        assert!(
+            rule_patch(&cli, &mine).get("prompt_template").is_some(),
+            "a diff against the reload would have overwritten it"
+        );
+        assert_eq!(edit_patch(&opened, &opened), json!({}), "no-op save");
         let mut touched = RuleDraft::from_rule(&fixed);
         touched.min_prompt_words = 8;
         assert_eq!(

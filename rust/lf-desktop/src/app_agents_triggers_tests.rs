@@ -613,3 +613,36 @@ fn the_plain_settings_scene_is_not_scrolled(cx: &mut TestAppContext) {
     let scroll = settings_page(&shell, cx).read_with(cx, |p, _| p.page_scroll());
     assert_eq!(scroll.offset().y, px(0.));
 }
+
+/// A field edited elsewhere (the CLI) while the editor is open, and left
+/// alone here, is not sent back with the editor's old value: Save sends
+/// only what was changed in this editor.
+#[gpui::test]
+fn save_sends_only_fields_changed_in_this_editor(cx: &mut TestAppContext) {
+    let (_shell, cx, _dir, fake, agents) = open_tab(cx, FakeAgents::use_settings_fixture);
+    open_rule(&agents, Some(RULE_LAUNCH), cx);
+    fake.update_rule(
+        RULE_LAUNCH,
+        &json!({"prompt_template": "Changed elsewhere: {prompt}"}),
+    )
+    .unwrap();
+    agents.update(cx, |a, cx| a.refresh(cx));
+    cx.run_until_parked();
+    assert_eq!(editor_id(&agents, cx), Some(Some(RULE_LAUNCH.into())));
+    let before = fake.rule_bodies().len();
+    agents.update(cx, |a, cx| {
+        a.choose_rule_agent("devin", "", cx);
+        a.save_rule(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(fake.rule_bodies()[before..], [json!({"provider": "devin"})]);
+    let rule = agents.read_with(cx, |a, _| {
+        a.rules_for_test()
+            .iter()
+            .find(|r| r.id == RULE_LAUNCH)
+            .cloned()
+            .unwrap()
+    });
+    assert_eq!(rule.provider, "devin");
+    assert_eq!(rule.prompt_template, "Changed elsewhere: {prompt}");
+}

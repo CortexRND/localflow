@@ -399,14 +399,18 @@ impl AgentsSettings {
             return;
         }
         let (id, instance) = (editor.id.clone(), editor.instance);
+        let baseline = editor.baseline.clone();
         let body = match &id {
             None => ctl::create_body(&draft),
             Some(id) => {
-                let Some(old) = self.rule(id) else {
+                if self.rule(id).is_none() {
                     self.rule_gone(cx);
                     return;
-                };
-                let patch = ctl::rule_patch(old, &draft);
+                }
+                // What the user changed since opening, not the difference
+                // from a reload: an edit made elsewhere to a field left
+                // alone here survives.
+                let patch = ctl::edit_patch(&baseline, &draft);
                 if patch.as_object().is_some_and(|m| m.is_empty()) {
                     // Nothing changed: nothing to send.
                     self.cancel_rule(cx);
