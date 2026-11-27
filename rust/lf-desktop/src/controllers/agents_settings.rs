@@ -427,13 +427,32 @@ pub fn alias_key(alias: &str) -> String {
         .join(" ")
 }
 
+/// Python's `ntpath.isabs`: rooted at the current drive (`/srv` or
+/// `\srv`) or a drive/UNC path. Rust's `Path::is_absolute` is stricter
+/// for root-only Windows paths, so don't use it there.
+fn windows_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(bytes.first(), Some(b'/' | b'\\'))
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
 /// Absolute after `~` expansion (the service's `isabs(expanduser(path))`),
 /// with no NUL or line break.
 pub fn absolute_folder(path: &str) -> bool {
     if path.is_empty() || path.chars().any(|c| matches!(c, '\0' | '\n' | '\r')) {
         return false;
     }
-    path == "~" || path.starts_with("~/") || Path::new(path).is_absolute()
+    path == "~"
+        || path.starts_with("~/")
+        || (cfg!(windows) && path.starts_with("~\\"))
+        || if cfg!(windows) {
+            windows_absolute(path)
+        } else {
+            Path::new(path).is_absolute()
+        }
 }
 
 /// The client-side checks before an add (the service stays the
@@ -804,6 +823,16 @@ mod tests {
             "é-key"
         );
         assert!(SecretValue::trimmed(" \n\t".into()).is_empty());
+    }
+
+    #[test]
+    fn windows_absolute_follows_python_not_rust() {
+        for path in ["/srv/docs", r"\srv\docs", "C:/src/docs", r"C:\src\docs"] {
+            assert!(windows_absolute(path), "absolute");
+        }
+        for path in ["C:relative", "srv/docs", ""] {
+            assert!(!windows_absolute(path), "relative");
+        }
     }
 
     #[test]
