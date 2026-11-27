@@ -4,8 +4,10 @@
 
 Item types (see PROTOCOL.md): meeting_chat and recall_ask go to the trusted
 Jev question sets (abstention, answer); meeting_notes, dictation_cleanup and
-work_prompts go to advisory custom questions. Each item carries the gate and
-item id gates.py uses, so report.py can line the two judges up.
+work_prompts go to advisory custom questions; the agents suite adds the advisory
+sets JA1-JA4 (agent_prompt_fidelity, agent_launch_intent, agent_error_helpfulness,
+agent_result_faithfulness). Each item carries the gate and item id gates.py uses,
+so report.py can line the two judges up.
 """
 
 from __future__ import annotations
@@ -19,12 +21,13 @@ from pathlib import Path
 import gates
 
 sys.path.insert(0, os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut")))
-from localflow.meetings import read_transcript_log
 
 CHAT_GATE = {"answerable": "M9", "unanswerable": "M10", "notes_only": "M11"}
 
 
 def transcript(result: dict) -> str:
+    from localflow.meetings import read_transcript_log
+
     with tempfile.TemporaryDirectory() as folder:
         log = Path(folder) / "log.md"
         log.write_text(result["log_text"], encoding="utf-8")
@@ -62,8 +65,49 @@ def recall_items(result: dict, cell: dict, base: dict) -> list[dict]:
     return items
 
 
+# JA1-JA4 (PROTOCOL.md "Agents"): which cell field feeds which Jev set.
+AGENT_SETS = (
+    ("jev_prompt_items", "agent_prompt_fidelity", "prompt"),
+    ("jev_intent_items", "agent_launch_intent", "intent"),
+    ("jev_error_items", "agent_error_helpfulness", "errors"),
+    ("jev_result_items", "agent_result_faithfulness", "results"),
+)
+MAX_FIELD = 6000
+
+
+def agents_items(result: dict, cell: dict, base: dict) -> list[dict]:
+    """JA1-JA4 items from one agents cell, limited to the cell's frozen `jev_sample`
+    (keeps a 3-repeat live Jev pass at ~30 items per repeat)."""
+    sample = cell.get("jev_sample") or {}
+    items = []
+    for field, kind_type, key in AGENT_SETS:
+        wanted = sample.get(key)
+        for row in result.get(field) or []:
+            if wanted is not None and row["id"] not in wanted:
+                continue
+            item = {**base, "type": kind_type, "gate": cell["gate"], "item": f"{cell['id']}:{row['id']}"}
+            if kind_type == "agent_prompt_fidelity":
+                item.update(kind="positive", transcript=row["transcript"], rules=row["rules"], prompt=row["prompt"],
+                            expected=row["expected"])
+            elif kind_type == "agent_launch_intent":
+                item.update(kind="expect_launch" if row["expected"] else "expect_no_launch",
+                            transcript=row["transcript"], rules=row["rules"], launched=row["launched"],
+                            expected=row["expected"], case=row["case"])
+            elif kind_type == "agent_error_helpfulness":
+                message = "\n".join(x for x in (row.get("detail"), row.get("error_message")) if x)
+                item.update(kind="error", cause=row["cause"], detail=row.get("detail", ""),
+                            error_message=row.get("error_message", ""), message=message)
+            else:
+                item.update(kind="result", prompt=row["prompt"], event_log=row["event_log"][:MAX_FIELD],
+                            result_text=row["result_text"][:MAX_FIELD], result_preview=row["result_preview"])
+            items.append(item)
+    return items
+
+
 def collect(run: Path) -> list[dict]:
-    index = gates.cell_index()
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+    index = gates.cell_index(gates.active_suites(manifest))
     items: list[dict] = []
     for path in sorted(run.glob("r*/results/*.json")):
         result = json.loads(path.read_text(encoding="utf-8"))
@@ -80,6 +124,8 @@ def collect(run: Path) -> list[dict]:
                           "kind": cell["expect"], "notes": result["notes"], "prompts_md": result["prompts_md"]})
         elif suite == "recall_ask":
             items += recall_items(result, cell, base)
+        elif suite == "agents":
+            items += agents_items(result, cell, base)
         elif kind in ("cleanup", "injection"):
             items.append({**base, "type": "dictation_cleanup", "gate": cell["gate"], "item": cid, "kind": kind,
                           "level": cell["level"], "transcript": result["input"], "output": result["output"]})

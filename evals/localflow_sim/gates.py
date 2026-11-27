@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 SUT = Path(os.environ.get("SIM_SUT", str(Path.home() / "work/sim-sut"))).expanduser()
 SPEC = json.loads((HERE / "scenarios.json").read_text(encoding="utf-8"))
 SUITES = SPEC["suites"]
-SUITE_ORDER = ("dictation", "meetings", "recall_ask", "mcp", "settings_api")
+SUITE_ORDER = ("dictation", "meetings", "recall_ask", "mcp", "settings_api", "agents")
 MEETINGS = {
     s["id"]: s
     for s in json.loads((HERE / SUITES["meetings"]["meeting_scenarios"]).resolve().read_text(encoding="utf-8"))["scenarios"]
@@ -55,12 +55,25 @@ GATES = {
     "S2": "/api/config GET/PUT round-trip",
     "S3": "config v1->v2 migration fidelity",
     "S4": "settings validator, apply/undo & unrequested-change warnings",
+    "A1": "agents lifecycle & state machine",
+    "A2": "hot-command parsing & dictation seam",
+    "A3": "agents concurrency & bounds",
+    "A4": "agents API contract & auth",
+    "A5": "agents secrets & redaction",
+    "A6": "agent provider adapters (scripted boundary)",
+    "A7": "agents idle cost & efficiency",
+    "A8": "agents recovery & cross-process",
 }
+GATE_SUITE = {"D": "dictation", "M": "meetings", "W": "meetings", "R": "recall_ask", "P": "mcp",
+              "S": "settings_api", "A": "agents"}
 # Minimum pooled-within-repeat rate; M7 is a maximum. Every other gate needs all items.
 THRESH = {"D1": 0.85, "D2": 0.85, "M5": 0.90, "M6": 0.70, "M7": 0.05, "M9": 0.80, "M10": 0.80,
           "R1": 0.90, "R4": 0.85, "R5": 0.85}
 MAX_GATES = {"M7"}
-SUITE_LIFECYCLE = {"dictation": "D6", "meetings": "M1", "recall_ask": "R6", "mcp": "P1", "settings_api": "S1"}
+SUITE_LIFECYCLE = {"dictation": "D6", "meetings": "M1", "recall_ask": "R6", "mcp": "P1", "settings_api": "S1",
+                   "agents": "A1"}
+PLANTED_MARK = "[REDACTED:planted]"  # driver.py scrubs a planted fake secret to this
+AGENTS_LIVE = ("L1-claude-live", "L2-devin-live")
 KIND_LIFECYCLE = {"workprompt": "W3"}
 RECALL_GATE = {"answerable": "R4", "unanswerable": "R5", "time_filter": "R2", "source_filter": "R3",
                "multi_turn": "R6"}
@@ -81,8 +94,20 @@ def suite_cells(suite: str) -> list[dict]:
     return cells + SUITES[suite]["cells"]
 
 
-def cell_index() -> dict[str, tuple[str, dict]]:
-    return {cell["id"]: (suite, cell) for suite in SUITE_ORDER for cell in suite_cells(suite)}
+def cell_index(suites=SUITE_ORDER) -> dict[str, tuple[str, dict]]:
+    return {cell["id"]: (suite, cell) for suite in SUITE_ORDER if suite in suites for cell in suite_cells(suite)}
+
+
+def gate_suite(gate: str) -> str:
+    return GATE_SUITE[gate[0]]
+
+
+def active_suites(manifest: dict) -> list[str]:
+    """Suites a run declared in manifest.json (all suites when it declares none)."""
+    declared = manifest.get("suites")
+    if not declared:
+        return list(SUITE_ORDER)
+    return [suite for suite in SUITE_ORDER if suite in declared]
 
 
 def cell_gate(cell: dict) -> str:
@@ -664,10 +689,353 @@ def gate_settings(res: dict, cell: dict, tally) -> None:
             tally("S4", ok, f"{cid}:{case['name']}", repr(warning))
 
 
+# ------------------------------------------------------------------ agents ---
+
+_FILL = re.compile(r"\{(prompt|title|session_id|repo)\}")
+
+
+def fill(template, values: dict):
+    """Placeholders on JSON string leaves, one pass (an inserted value is never re-scanned)."""
+    if isinstance(template, str):
+        return _FILL.sub(lambda m: values[m.group(1)], template)
+    if isinstance(template, list):
+        return [fill(v, values) for v in template]
+    if isinstance(template, dict):
+        return {k: fill(v, values) for k, v in template.items()}
+    return template
+
+
+def _agents_lifecycle(res: dict, cell: dict, tally) -> None:
+    cid, runs = cell["id"], res["runs"]
+    for name, expected in cell["expect"].items():
+        run = runs.get(name) or {}
+        tally("A1", run.get("states") == expected, f"{cid}:{name}:states", repr(run.get("states")))
+        tally("A1", run.get("state") == expected[-1], f"{cid}:{name}:final", str(run.get("state")))
+        tally("A1", bool(run) and run["seqs"] == list(range(1, run["last_seq"] + 1)), f"{cid}:{name}:seq-contiguous")
+    for name, code in cell["errors"].items():
+        tally("A1", ((runs.get(name) or {}).get("error") or {}).get("code") == code, f"{cid}:{name}:error-code")
+    tally("A1", (runs.get("ok") or {}).get("result_text", "").startswith("done: "), f"{cid}:ok:result")
+    tally("A1", res["waiting_seen"] == "waiting_input" and res["message"] == {"status": 202, "event_type": "message"},
+          f"{cid}:needs_input:message")
+    tally("A1", res["queued_seen"] == "queued" and res["cancel_queued_status"] == 200, f"{cid}:cancel_queued:http")
+    tally("A1", res["cancel_running_status"] == 200 and res["flaky_cancel_status"] == 200, f"{cid}:cancel:http")
+    for move in res["illegal"]:
+        tally("A1", move["raised"] and move.get("current") == "running", f"{cid}:illegal:running->{move['to']}")
+    cas = res["cas"]
+    tally("A1", cas["raised"] and cas.get("current") == "running" and cas.get("expected") == ["queued"], f"{cid}:cas")
+    parent, child = res["resume_ids"]["parent"], res["resume_ids"]["child"]
+    kid, grand = runs.get("resume_child") or {}, runs.get("resume_grandchild") or {}
+    tally("A1", bool(child) and kid.get("parent_id") == parent and kid.get("root_id") == parent, f"{cid}:resume:child")
+    tally("A1", grand.get("parent_id") == child and grand.get("root_id") == parent, f"{cid}:resume:grandchild")
+    tally("A1", res["resume_unknown"] == {"status": 400, "code": "validation"}, f"{cid}:resume:unknown")
+    for check in res["terminal_checks"]:
+        name, state = check["run"], check["state"]
+        cancel, message = check["cancel"], check["message"]
+        if state == "cancelled":
+            ok = cancel["status"] == 200 and cancel["session_state"] == "cancelled"
+        else:
+            ok = (cancel["status"] == 409 and cancel["code"] == "session_conflict" and cancel["state"] == state
+                  and bool(cancel["expected"]))
+        tally("A1", ok, f"{cid}:terminal:{name}:cancel", json.dumps(cancel))
+        tally("A1", message["status"] == 409 and message["code"] == "session_conflict" and message["state"] == state
+              and message["expected"] == ["running", "waiting_input"], f"{cid}:terminal:{name}:message")
+        tally("A1", all(d["raised"] and d.get("current") == state for d in check["direct"])
+              and len(check["direct"]) == 9, f"{cid}:terminal:{name}:direct")
+        tally("A1", check["unchanged"] is True, f"{cid}:terminal:{name}:unchanged")
+    tally("A1", len(res["terminal_checks"]) == 4, f"{cid}:terminal:count")
+
+
+A2_NEGATIVE_CASES = {"mid_sentence", "partial_word", "too_few_words", "disabled_rule", "flag_off", "alias_removed",
+                     "cooldown", "command_job", "transform_job", "history_retry"}
+
+
+def _agents_hotcommands(res: dict, cell: dict, tally) -> None:
+    cid, spec = cell["id"], cell["hot"]
+    tally("A2", all(r["status"] == 201 and r["id"] for r in res["rules"].values())
+          and len(res["rules"]) == len(spec["rules"]), f"{cid}:rules-created")
+    for item in res["conflicts"]:
+        tally("A2", item["status"] == 409 and item["code"] == "rule_conflict", f"{cid}:conflict:{item['name']}")
+    tally("A2", len(res["conflicts"]) == len(spec["conflicts"]), f"{cid}:conflict:count")
+    tally("A2", res["direct_conflict"] == "HotCommandConflict" and res["rules_after_conflicts"] is True,
+          f"{cid}:conflict:direct")
+    ids = res["rule_ids"]
+    got = {u["id"]: u for u in res["utterances"]}
+    for p in spec["positives"]:
+        u = got.get(p["id"], {})
+        want = {"rule_id": ids.get(p["rule"]), "provider": p["provider"], "repo": p["repo"], "prompt": p["prompt"],
+                "origin": "hot_command"}
+        launches = u.get("launches", [])
+        first = {k: v for k, v in (launches[0] if launches else {}).items() if k != "id"}
+        tally("A2", len(launches) == 1 and same(first, want) and len(launches[0].get("id") or "") == 12,
+              f"{cid}:{p['id']}:launch", json.dumps(first))
+        tally("A2", u.get("returned") is None and u.get("error") is False, f"{cid}:{p['id']}:no-paste")
+        tally("A2", u.get("history") == {"kind": "command", "raw_text": p["text"], "final_text": "", "status": "ok"}
+              and u.get("history_audio") is False, f"{cid}:{p['id']}:history", json.dumps(u.get("history")))
+        route = u.get("route") or {}
+        tally("A2", route.get("matched") is True and all(route.get(k) == want[k] for k in ("rule_id", "provider",
+                                                                                             "repo", "prompt")),
+              f"{cid}:{p['id']}:route-agrees", json.dumps(route)[:160])
+    for n in spec["negatives"]:
+        u = got.get(n["id"], {})
+        kind = (n.get("context") or {}).get("kind", "dictate")
+        tally("A2", u.get("launches") == [], f"{cid}:{n['id']}:no-launch", json.dumps(u.get("launches")))
+        tally("A2", bool(u) and u.get("returned") is not None and u.get("returned") == u.get("normal"),
+              f"{cid}:{n['id']}:normal-output", repr(u.get("returned"))[:80])
+        if u.get("history") is not None:
+            tally("A2", u["history"]["kind"] == kind, f"{cid}:{n['id']}:history-kind")
+        if u.get("route_comparable"):
+            tally("A2", (u.get("route") or {}).get("matched") is not True, f"{cid}:{n['id']}:route-agrees")
+    cases = {n["case"] for n in spec["negatives"]}
+    tally("A2", len(spec["positives"]) >= 20 and len(spec["negatives"]) >= 20 and len(got) ==
+          len(spec["positives"]) + len(spec["negatives"]), f"{cid}:corpus-size")
+    tally("A2", A2_NEGATIVE_CASES <= cases, f"{cid}:negative-coverage", ",".join(sorted(A2_NEGATIVE_CASES - cases)))
+    tally("A2", res["pasted"] == [], f"{cid}:never-pasted")
+
+
+def _agents_concurrency(res: dict, cell: dict, tally) -> None:
+    cid, b = cell["id"], cell["bounds"]
+    launches = res["launches"]
+    n = b["slow_launches"]
+    tally("A3", [x["status"] for x in launches] == [202] * (n - 1) + [429], f"{cid}:slow:statuses")
+    tally("A3", launches[-1]["code"] == "queue_full" and launches[-1]["retry_after"] == "5", f"{cid}:slow:queue-full")
+    tally("A3", res["sessions_after_slow"] == n - 1, f"{cid}:slow:refused-created-nothing")
+    tally("A3", res["slow_final"] == ["completed"] * (n - 1), f"{cid}:slow:all-completed")
+    tally("A3", 0 < res["peak_running"] <= b["max_concurrent"], f"{cid}:slow:max-concurrent", str(res["peak_running"]))
+    tally("A3", res["admission_order"] == res["launch_order"], f"{cid}:slow:fifo")
+    flood = res["flood"]
+    tally("A3", flood["file_bytes"] <= flood["limit_bytes"] + 32 * 1024, f"{cid}:flood:log-bound", str(flood["file_bytes"]))
+    tally("A3", flood["truncated_events"] == 1 and flood["output_after_truncated"] is False, f"{cid}:flood:one-truncated")
+    tally("A3", flood["last_event"] == {"type": "state", "state": "completed"} and flood["state"] == "completed",
+          f"{cid}:flood:final-state-event")
+    tally("A3", flood["result_chars"] <= 16 * 1024 and flood["result_truncated"] is True, f"{cid}:flood:result-bound")
+    tally("A3", flood["seqs_contiguous"] is True, f"{cid}:flood:seq-contiguous")
+    ret = res["retention"]
+    excess = len(ret["creation_order"]) - b["max_sessions"]
+    removed = set(ret["creation_order"]) - set(ret["remaining"])
+    tally("A3", ret["count"] == b["max_sessions"], f"{cid}:retention:count", str(ret["count"]))
+    tally("A3", removed == set(ret["terminal_ids_in_order"][:excess]) and excess > 0, f"{cid}:retention:oldest-terminal")
+    tally("A3", ret["active_state"] == "running" and ret["active_id"] in ret["remaining"], f"{cid}:retention:active-kept")
+    tally("A3", ret["event_files"] == ret["remaining"], f"{cid}:retention:logs-removed")
+
+
+def _agents_api(res: dict, cell: dict, tally) -> None:
+    cid = cell["id"]
+    for probe in res["probes"]:
+        call, write = probe["call"], not probe["call"].startswith("GET ")
+        tally("A4", probe["no_token"] == 401 and probe["wrong_token"] == 401, f"{cid}:auth:{call}")
+        tally("A4", probe["foreign_host"] == 403, f"{cid}:host:{call}")
+        if write:
+            tally("A4", probe["remote"] == 403 and probe["remote_code"] == "local_only" and not probe["remote_schema"],
+                  f"{cid}:local-only:{call}", json.dumps(probe.get("remote_schema")))
+            tally("A4", probe["foreign_host_with_token"] == 403, f"{cid}:local-only-host:{call}")
+    tally("A4", len(res["probes"]) == len(res["routes_all"]) == 21, f"{cid}:routes:probed")
+    tally("A4", res["proxied_write"] == 403, f"{cid}:local-only:proxied")
+    tally("A4", res["unchanged_after_probes"] is True, f"{cid}:auth:nothing-changed")
+    tally("A4", set(res["routes_all"]) <= set(res["routes_hit"]), f"{cid}:routes:exercised",
+          ",".join(sorted(set(res["routes_all"]) - set(res["routes_hit"]))))
+    for i, entry in enumerate(res["schema"]):
+        tally("A4", entry["schema_errors"] == [], f"{cid}:schema:{i:03d}:{entry['call']}:{entry['status']}",
+              "; ".join(entry["schema_errors"])[:160])
+    page = res["pagination"]
+    tally("A4", page["walked"] == page["sorted"] and len(set(page["walked"])) == len(page["walked"])
+          and sorted(page["walked"]) == sorted(page["all"]) and page["pages"] >= 3, f"{cid}:pagination")
+    f, want = res["filters"], res["filters"]["_expect"]
+    tally("A4", sorted(f["state_failed"]["ids"]) == want["failed"] and f["state_failed"]["states"] == ["failed"],
+          f"{cid}:filter:state")
+    tally("A4", sorted(f["state_terminal"]["ids"]) == want["terminal"] and f["state_active"]["ids"] == [],
+          f"{cid}:filter:alias")
+    tally("A4", sorted(f["provider_mock"]["ids"]) == want["terminal"], f"{cid}:filter:provider")
+    tally("A4", f["origin_cli"]["ids"] == want["cli"], f"{cid}:filter:origin")
+    tally("A4", f["q"]["ids"] == want["q"], f"{cid}:filter:q")
+    tally("A4", f["root_id"]["ids"] == want["root"], f"{cid}:filter:root_id")
+    tally("A4", all(v == 400 for v in res["bad_filters"].values()) and len(res["bad_filters"]) == 5, f"{cid}:filter:bad-400")
+    idem = res["idempotent"]
+    tally("A4", idem["first"] == 202 and idem["replay"] == 200 and idem["same_session"] and idem["created"] == 1,
+          f"{cid}:idempotent-replay")
+    tally("A4", idem["conflict"] == 409 and idem["conflict_code"] == "id_conflict", f"{cid}:id-conflict")
+    cursor = res["cursor"]
+    tally("A4", cursor["seqs"] == list(range(1, cursor["last_seq"] + 1)) and cursor["last_seq"] > 2, f"{cid}:events-cursor")
+    lp = res["long_poll"]
+    tally("A4", lp["idle_waited"] is True and lp["idle_events"] == 0 and lp["wait"] - 0.05 <= lp["idle_secs"] <= lp["wait"] + 1,
+          f"{cid}:long-poll:idle", str(lp["idle_secs"]))
+    tally("A4", lp["woke_texts"] == ["ping"] and lp["woke_secs"] - lp["event_delay"] < 1.0, f"{cid}:long-poll:event",
+          str(lp["woke_secs"]))
+    ch = res["changes"]
+    tally("A4", ch["waited"] is True and ch["launched"] in ch["changed_ids"] and ch["woke_secs"] < 1.3, f"{cid}:changes:update")
+    tally("A4", ch["deleted"] == [ch["launched"]] and ch["deleted_reset"] is False, f"{cid}:changes:deleted")
+    tally("A4", ch["future_reset"] is True, f"{cid}:changes:reset")
+
+
+def _agents_secrets(res: dict, cell: dict, tally) -> None:
+    cid = cell["id"]
+    echo = res["secret_echo"]
+    tally("A5", echo == {"state": "completed", "event_redacted": True, "result_redacted": True}, f"{cid}:secret_echo")
+    tally("A5", res["prompt_redacted"] == {"status": 202, "prompt": True, "title": True}, f"{cid}:prompt-redacted")
+    devin = res["devin"]
+    tally("A5", devin["state"] == "completed" and devin["auth"] and set(devin["auth"]) == {"planted"}
+          and devin["event_redacted"] and devin["result_redacted"], f"{cid}:devin-echo-redacted")
+    tally("A5", all(x["status"] == 400 and x["code"] == "validation" for x in res["literal_header"])
+          and len(res["literal_header"]) == 3 and res["literal_profiles_unchanged"], f"{cid}:literal-credential-refused")
+    oc = res["origin_change"]
+    tally("A5", oc["secret_set_before"] is True and oc["status"] == 200 and oc["secret_set_after"] is False
+          and oc["readiness"] == "missing_secret", f"{cid}:origin-change-clears-secret", json.dumps(oc))
+    tally("A5", oc["launch_status"] == 409 and oc["launch_code"] == "provider_not_ready" and oc["new_origin_requests"] == [],
+          f"{cid}:origin-change-token-not-sent")
+    rc = res["remote_config"]
+    tally("A5", [p["status"] for p in rc["puts"]] == [403, 403, 403] and rc["disk_unchanged"] and rc["live_unchanged"],
+          f"{cid}:remote-config-local-only")
+    tally("A5", res["secret_route"] == {"status": 503, "code": "secrets_unavailable"}, f"{cid}:secret-route")
+    leaks = res["leaks"]
+    tally("A5", leaks["files_scanned"] > 0 and leaks["file_leaks"] == [], f"{cid}:no-leak:files", ",".join(leaks["file_leaks"]))
+    tally("A5", leaks["http_bodies"] > 0 and leaks["http_leak"] is False, f"{cid}:no-leak:http")
+    tally("A5", leaks["cli_leak"] is False and leaks["cli_shows_redacted"] is True
+          and sum(r["exit"] == 0 for r in res["cli"]) >= 4, f"{cid}:no-leak:cli")
+
+
+def _agents_providers(res: dict, cell: dict, tally) -> None:
+    cid, spec = cell["id"], cell["providers"]
+    claude = res["claude"]
+    base_argv = cell["expect_argv"]["base"]
+    for name, argv in cell["expect_argv"].items():
+        row = claude.get(name) or {}
+        rec = row.get("record") or {}
+        tally("A6", [rec.get("name"), *(rec.get("argv") or [])] == argv and row.get("invocations") == 1,
+              f"{cid}:claude:{name}:argv", json.dumps(rec.get("argv")))
+        tally("A6", row.get("state") == "completed", f"{cid}:claude:{name}:completed", str(row.get("error")))
+        tally("A6", rec.get("cwd") == claude["repo_path"] and rec.get("env_localflow") == [] and rec.get("env_scrubbed")
+              and rec.get("anthropic_key_is_planted") and rec.get("own_process_group"), f"{cid}:claude:{name}:cwd-env")
+        tally("A6", rec.get("stdin") == row.get("prompt") and row.get("prompt")
+              and not any(row["prompt"] in a for a in rec.get("argv") or []), f"{cid}:claude:{name}:stdin")
+    head = (claude.get("headroom") or {}).get("record") or {}
+    tally("A6", all(head.get("headroom_env", {}).get(k) == v for k, v in cell["expect_headroom_env"].items()),
+          f"{cid}:claude:headroom:env")
+    base = claude.get("base") or {}
+    tally("A6", same(base.get("usage"), cell["expect_usage"]) and base.get("external_id") == "fake-session-123"
+          and base.get("result_text") == f"fake result for: {spec['claude_prompt'][:40]}", f"{cid}:claude:base:result")
+    stream = claude.get("stream") or {}
+    tally("A6", "thinking about it" in stream.get("outputs", []) and stream.get("external_id") == "fake-stream-9",
+          f"{cid}:claude:stream:events")
+    for i, prompt in enumerate(spec["injection_prompts"]):
+        row = claude.get(f"injection_{i}") or {}
+        rec = row.get("record") or {}
+        tally("A6", rec.get("stdin") == prompt and [rec.get("name"), *(rec.get("argv") or [])] == base_argv
+              and row.get("state") == "completed", f"{cid}:claude:injection_{i}")
+    for name, (state, code) in cell["expect_modes"].items():
+        row = claude.get(name) or {}
+        tally("A6", row.get("state") == state and (row.get("error") or {}).get("code") == code, f"{cid}:claude:{name}",
+              json.dumps(row.get("error")))
+    for name, code in (("missing_binary", "missing_binary"), ("missing_wrapper", "missing_wrapper")):
+        row = claude.get(name) or {}
+        tally("A6", row.get("error") == "provider_not_ready" and row.get("readiness") == code, f"{cid}:claude:{name}")
+
+    def cloud(section: str, case: dict) -> None:
+        name = case["name"]
+        row = res[section].get(name) or {}
+        item = f"{cid}:{section}:{name}"
+        tally("A6", row.get("states") == case["expect_states"], f"{item}:states", repr(row.get("states")))
+        reqs = row.get("requests", [])
+        values = {"prompt": row.get("prompt", ""), "title": row.get("title", ""), "session_id": row.get("id", ""),
+                  "repo": "simrepo"}
+        shape = [[r["method"], r["path"]] for r in reqs] == [[m, p] for m, p, _ in case["expect_requests"]]
+        bodies = shape and all(body is None or same(r["json"], fill(body, values))
+                               for r, (_m, _p, body) in zip(reqs, case["expect_requests"]))
+        tally("A6", shape and bodies, f"{item}:requests", json.dumps([[r["method"], r["path"]] for r in reqs])[:160])
+        tally("A6", bool(reqs) and {r["auth"] for r in reqs} == {case.get("expect_auth", "planted")}, f"{item}:auth")
+        if "expect_error" in case:
+            tally("A6", (row.get("error") or {}).get("code") == case["expect_error"], f"{item}:error-code")
+        if "expect_message_contains" in case:
+            tally("A6", case["expect_message_contains"] in (row.get("error") or {}).get("message", ""), f"{item}:retries")
+        if "expect_result" in case:
+            tally("A6", row.get("result_text") == case["expect_result"], f"{item}:result")
+        if "expect_outputs" in case:
+            tally("A6", row.get("outputs") == case["expect_outputs"], f"{item}:outputs")
+        if "expect_raw_status" in case:
+            tally("A6", row.get("raw_status") == case["expect_raw_status"], f"{item}:unknown-status-kept")
+        if "expect_external" in case:
+            tally("A6", [row.get("external_id"), row.get("external_url")] == case["expect_external"], f"{item}:external")
+        if "expect_ticks" in case:
+            tally("A6", row.get("states_after_tick", [])[:len(case["expect_ticks"])] == case["expect_ticks"],
+                  f"{item}:retry-schedule", repr(row.get("states_after_tick")))
+        if "expect_next_poll_in" in case:
+            tally("A6", row.get("next_poll_in") == case["expect_next_poll_in"], f"{item}:retry-after")
+        tally("A6", row.get("seqs_contiguous") is True, f"{item}:seq-contiguous")
+
+    for case in spec["devin_cases"]:
+        cloud("devin", case)
+    for case in spec["http_cases"]:
+        cloud("http", case)
+    timeout = res["devin"].get("timeout") or {}
+    tally("A6", timeout.get("state") == "failed" and (timeout.get("error") or {}).get("code") == "upstream_error"
+          and timeout.get("states_after_tick", [])[:5] == ["running"] * 4 + ["failed"], f"{cid}:devin:timeout:retries")
+    missing = res["devin"].get("missing_key") or {}
+    tally("A6", missing.get("error") == "provider_not_ready" and missing.get("readiness") == "missing_secret",
+          f"{cid}:devin:missing_key")
+
+
+def _agents_idle(res: dict, cell: dict, tally) -> None:
+    cid, perf = cell["id"], cell["perf"]
+    off = res["feature_off"]
+    tally("A7", off.get("agents_enabled") is False and off.get("after_job") == [] and off.get("after_server") == []
+          and off.get("manager_module") is False, f"{cid}:off:no-import", json.dumps(off)[:200])
+    tally("A7", off.get("threads") == [] and res["feature_off_agents_dir"] is False, f"{cid}:off:no-threads-or-files")
+    tally("A7", off.get("text") == "launch claude to fix the flaky test"
+          and set((off.get("statuses") or {}).values()) == {200}, f"{cid}:off:normal-behaviour")
+    idle = res["feature_on_idle"]
+    tally("A7", idle == {"threads": [], "providers": 0, "supervisor": False}, f"{cid}:on:idle", json.dumps(idle))
+    tally("A7", res["supervisor_exit_secs"] <= perf["supervisor_exit_secs"] and res["threads_after"] == [],
+          f"{cid}:on:supervisor-exits", str(res["supervisor_exit_secs"]))
+    match = res["match"]
+    tally("A7", match["n"] == perf["utterances"] and match["rules"] == perf["rules"] and match["matched"] > 0
+          and match["p95_ms"] <= perf["p95_gate_ms"], f"{cid}:match-p95", str(match["p95_ms"]))
+    submit = res["submit"]
+    tally("A7", submit["max_ms"] <= perf["submit_gate_ms"] and submit["cues"] == ["error"] * 5, f"{cid}:submit-server-down",
+          str(submit["max_ms"]))
+
+
+def _agents_recovery(res: dict, cell: dict, tally) -> None:
+    cid = cell["id"]
+    tally("A8", res["before_kill"] == {"claude": "running", "devin": "running", "queued": "queued"}
+          and res["killed_exit"] == -9, f"{cid}:killed-mid-run", json.dumps(res["before_kill"]))
+    after = res["after_restart"]
+    tally("A8", after.get("claude") == {"state": "failed", "error": "interrupted"}, f"{cid}:restart:local-interrupted")
+    tally("A8", after.get("queued") == {"state": "failed", "error": "interrupted"}, f"{cid}:restart:queued-interrupted")
+    tally("A8", after.get("devin") == {"state": "completed", "error": None} and bool(res["devin_requests"])
+          and {r[2] for r in res["devin_requests"]} == {"planted"}
+          and res["devin_result"] == "Recovered after the restart and finished.", f"{cid}:restart:devin-reattached")
+    x = res["xproc"]
+    tally("A8", all(w.get("exit") == 0 and w.get("unreadable") == 0 for w in x["writers"]) and len(x["writers"]) == 2,
+          f"{cid}:xproc:never-unreadable", json.dumps(x["writers"]))
+    tally("A8", x["entries"] == x["unique"] == x["expected"] == 2 * cell["xproc"]["writes_per_process"]
+          and x["missing"] == [] and x["per_writer_in_order"], f"{cid}:xproc:none-lost", str(x["entries"]))
+    tally("A8", x["alternations"] > 0, f"{cid}:xproc:interleaved")
+    down = res["server_down"]
+    tally("A8", down["returned"] == [None, False] and down["pasted"] == [] and down["raised"] == "", f"{cid}:down:no-paste")
+    tally("A8", down["history"] == {"kind": "command", "raw_text": "Launch Claude to fix the flaky hot phrase test",
+                                    "final_text": "", "status": "ok"}, f"{cid}:down:history")
+    tally("A8", down["warning"] and not down["exception_logged"] and not down["prompt_in_logs"]
+          and down["cues"] == ["error"], f"{cid}:down:warning-no-exception")
+
+
+AGENT_GATES = {"agents_lifecycle": _agents_lifecycle, "agents_hotcommands": _agents_hotcommands,
+               "agents_concurrency": _agents_concurrency, "agents_api": _agents_api,
+               "agents_secrets": _agents_secrets, "agents_providers": _agents_providers,
+               "agents_idle": _agents_idle, "agents_recovery": _agents_recovery}
+
+
+def gate_agents(res: dict, cell: dict, tally) -> None:
+    """A1-A8 (PROTOCOL.md "Agents"). Every agents cell also feeds A5 with a check
+    that no planted fake secret reached its result file."""
+    text = json.dumps(res)
+    tally("A5", PLANTED_MARK not in text and "sim-secret-" not in text, f"{cell['id']}:result-json-clean")
+    tally(cell["gate"], res.get("localflow_file_in_sut") is True, f"{cell['id']}:sut-import")
+    AGENT_GATES[cell["kind"]](res, cell, tally)
+
+
 # ------------------------------------------------------------------- repeat ---
 
-def repeat_gates(results_dir: Path, repeat: str, pinned: str, helpers, extras: dict) -> tuple[dict, list]:
-    g = {key: {"k": 0, "n": 0, "fail": [], "items": {}} for key in GATES}
+def repeat_gates(results_dir: Path, repeat: str, pinned: str, helpers, extras: dict,
+                 suites=SUITE_ORDER) -> tuple[dict, list]:
+    g = {key: {"k": 0, "n": 0, "fail": [], "items": {}} for key in GATES if gate_suite(key) in suites}
 
     def tally(gate: str, ok, item: str, why: str = "") -> None:
         ok = bool(ok)
@@ -678,7 +1046,7 @@ def repeat_gates(results_dir: Path, repeat: str, pinned: str, helpers, extras: d
             g[gate]["fail"].append(f"{item} ({why})" if why else item)
 
     not_exercised = []
-    for cid, (suite, cell) in cell_index().items():
+    for cid, (suite, cell) in cell_index(suites).items():
         path = results_dir / f"{cid}.json"
         reason = ""
         res = None
@@ -711,9 +1079,11 @@ def repeat_gates(results_dir: Path, repeat: str, pinned: str, helpers, extras: d
                     gate_recall(res, cell, tally)
                 elif suite == "mcp":
                     gate_mcp(res, cell, tally, extras)
+                elif suite == "agents":
+                    gate_agents(res, cell, tally)
                 else:
                     gate_settings(res, cell, tally)
-            except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            except (KeyError, IndexError, TypeError, AttributeError, ValueError) as exc:
                 reason = f"malformed result: {type(exc).__name__}: {exc}"
         if reason:
             not_exercised.append({"repeat": repeat, "suite": suite, "cell": cid, "reason": reason})
@@ -748,13 +1118,16 @@ def compute(run: Path) -> dict:
     declared = [f"r{k}" for k in range(1, int(manifest.get("repeats", 0)) + 1)]
     repeats = declared if declared else found
     extras = {"commits_seen": set(), "sut_dirty": False, "rust_cells": 0, "meeting_auth_probe": {"k": 0, "n": 0}}
-    helpers = _meeting_helpers()
+    suites = active_suites(manifest)
+    helpers = _meeting_helpers() if "meetings" in suites else None
     per, not_exercised = {}, []
     for name in repeats:
-        per[name], missing = repeat_gates(run / name / "results", name, pinned, helpers, extras)
+        per[name], missing = repeat_gates(run / name / "results", name, pinned, helpers, extras, suites)
         not_exercised += missing
     summary = {}
     for key, gate_name in GATES.items():
+        if gate_suite(key) not in suites:
+            continue
         vals = [per[r][key] for r in per]
         passes = [v["pass"] for v in vals if v["pass"] is not None]
         k = sum(v["k"] for v in vals)
@@ -778,7 +1151,16 @@ def compute(run: Path) -> dict:
         }
     commits_seen = sorted(extras["commits_seen"])
     notes = []
-    if not extras["rust_cells"]:
+    if set(suites) != set(SUITE_ORDER):
+        notes.append(f"Scoped run: only the {', '.join(suites)} suite(s) declared in manifest.json are gated.")
+    live = []
+    if "agents" in suites:
+        wanted = [x for x in str(manifest.get("agents_live") or "").split(",") if x]
+        live = [{"cell": cell, "status": "not exercised",
+                 "reason": "AGENTS_LIVE unset" if not wanted else "no live runner in this harness version"}
+                for cell in AGENTS_LIVE]
+        notes.append("Agents live cells L1/L2 not exercised (outside the gated matrix; never change the verdict).")
+    if "mcp" in suites and not extras["rust_cells"]:
         notes.append("P4: Python-vs-Rust parity not exercised (MCP_RUST_BIN not provided); "
                      "P4 covers JSON-RPC error handling only.")
     if extras["sut_dirty"]:
@@ -790,7 +1172,8 @@ def compute(run: Path) -> dict:
         "run": str(run), "pinned_commit": pinned,
         "pinned_source": "scenarios.json",
         "commits_seen": commits_seen, "commit_ok": commits_seen == [pinned] and manifest_ok,
-        "repeats": repeats, "expected_cells_per_repeat": len(cell_index()),
+        "repeats": repeats, "active_suites": suites, "expected_cells_per_repeat": len(cell_index(suites)),
+        "live": live,
         "not_exercised": not_exercised, "notes": notes,
         "extras": {"rust_parity_cells": extras["rust_cells"], "meeting_auth_probe": extras["meeting_auth_probe"],
                    "sut_dirty": extras["sut_dirty"]},

@@ -1,5 +1,7 @@
 // LocalFlow full-feature sim: Jev second judge.
-// Trusted: answer, abstention (cortex evals/sim/judge.ts). Advisory: custom notes / cleanup / work-prompt questions.
+// Trusted: answer, abstention (cortex evals/sim/judge.ts). Advisory: custom notes / cleanup / work-prompt questions,
+// and the agents sets JA1-JA4 (agent_prompt_fidelity, agent_launch_intent, agent_error_helpfulness,
+// agent_result_faithfulness), advisory until calibrated (PROTOCOL.md "Agents").
 //
 // Run from a CortexRND/cortex checkout (the judge and the SDK are resolved from the working directory):
 //   cd ~/repos/cortex && TYPESAFE_API_KEY="$JEV_API_Key" JUDGE_MODE=live \
@@ -92,6 +94,45 @@ async function main(): Promise<void> {
         {
           groundedInNotes: 'work_prompts lists tasks derived from the meeting notes (or says no new work was identified). Is every task in work_prompts supported by a decision or action item in notes?',
           inventedWork: 'Does work_prompts contain a task, owner, deadline or requirement that does not appear in notes?',
+        },
+      );
+    } else if (it.type === 'agent_prompt_fidelity') {
+      // JA1 (advisory until calibrated): the launch prompt a hot command extracted.
+      Object.assign(row, { transcript: it.transcript, prompt: it.prompt });
+      row.advisory = await advisory(
+        { transcript: it.transcript.slice(0, MAX_FIELD), hot_command_rules: it.rules.slice(0, MAX_FIELD), extracted_prompt: it.prompt.slice(0, MAX_FIELD) },
+        {
+          preservesTask: 'transcript is a spoken hot command: the trigger words of one of hot_command_rules, optionally "in"/"on" a repo alias and "to", then a task. extracted_prompt is the task LocalFlow sends to the coding agent (a rule may wrap the task in its prompt template, or replace it with its fixed prompt). Ignoring the trigger and repo words, does extracted_prompt ask for the same task as the transcript (or exactly the matching rule\'s template / fixed prompt)?',
+          addedOrDropped: 'Compared with the transcript (trigger and repo words excluded) and the matching rule in hot_command_rules, does extracted_prompt add an instruction or detail that is in neither, or drop a material part of the requested task?',
+        },
+      );
+    } else if (it.type === 'agent_launch_intent') {
+      // JA2 (advisory): guards the corpus labels; compared with the gate's launched/expected label.
+      Object.assign(row, { transcript: it.transcript, launched: it.launched, expected: it.expected, case: it.case });
+      row.advisory = await advisory(
+        { transcript: it.transcript.slice(0, MAX_FIELD), hot_command_rules: it.rules.slice(0, MAX_FIELD) },
+        {
+          shouldLaunch: 'hot_command_rules lists the voice commands that start a coding agent. Is transcript a request to start an agent under these rules: it begins with an enabled rule\'s exact trigger words (not mid-sentence, not another word form) followed by at least that rule\'s minimum number of prompt words (a fixed-prompt rule needs none)?',
+        },
+      );
+    } else if (it.type === 'agent_error_helpfulness') {
+      // JA3 (advisory): the user-facing error text for a scripted failure.
+      Object.assign(row, { cause: it.cause, message: it.message });
+      row.advisory = await advisory(
+        { scripted_cause: it.cause, user_message: (it.message || '(no message)').slice(0, MAX_FIELD) },
+        {
+          statesCauseAndNextStep: 'scripted_cause is what actually went wrong. user_message is the error LocalFlow showed the user. Does user_message state that cause (or an equivalent) and give, or make obvious, a correct next step?',
+          leaksCredential: 'Does user_message contain something that looks like a secret value (an API key, token, password or bearer credential), not just the name of a setting?',
+        },
+      );
+    } else if (it.type === 'agent_result_faithfulness') {
+      // JA4 (advisory): the reported result versus the full event log.
+      Object.assign(row, { result_text: it.result_text, result_preview: it.result_preview });
+      row.advisory = await advisory(
+        { task_prompt: it.prompt.slice(0, MAX_FIELD), event_log: it.event_log.slice(0, MAX_SOURCE), result_text: it.result_text.slice(0, MAX_FIELD), result_preview: it.result_preview },
+        {
+          supportedByLog: 'event_log is the full event log of an agent run for task_prompt. Is every claim in result_text supported by event_log?',
+          inventedByTruncation: 'result_preview is the first 200 characters of result_text. Does result_preview state something the log does not support because it was cut short (for example a number, name or outcome cut mid-way so it reads differently)?',
         },
       );
     } else {
